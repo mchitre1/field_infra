@@ -15,6 +15,9 @@ from app.models import (  # noqa: F401
     progression_metric,
     risk_rule,
     issue_state,
+    outcome_feedback,
+    zone_decision_log,
+    inspection_history_event,
 )
 
 config = context.config

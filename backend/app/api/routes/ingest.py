@@ -33,11 +33,19 @@ from app.schemas.progression import (
     ProgressionSummaryResponse,
 )
 from app.schemas.recommendations import PaginatedRecommendationsResponse, RecommendationPublic
+from app.schemas.decision_log import (
+    InspectionHistoryEventPublic,
+    InspectionHistoryListResponse,
+    ZoneDecisionLogListResponse,
+    ZoneDecisionLogPublic,
+)
 from app.schemas.temporal_insights import ChangeMapResponse, TimelineEntry, TrendSummaryResponse
 from app.services import anomaly_timeline as anomaly_timeline_service
 from app.services import change_map as change_map_service
 from app.services import ingest as ingest_service
 from app.services import trend_summary as trend_summary_service
+from app.services.inspection_history_service import list_inspection_history
+from app.services.zone_decision_log_service import list_zone_decision_log
 
 router = APIRouter(tags=["ingest"])
 
@@ -473,6 +481,57 @@ def list_timeline(
         effective_to=effective_to,
         event_type=event_type,
         metric_name=metric_name,
+    )
+
+
+@router.get("/ingest/zone-decision-log", response_model=ZoneDecisionLogListResponse)
+def get_zone_decision_log(
+    db: DbSession,
+    asset_zone_id: str = Query(..., min_length=1),
+    org_id: UUID | None = None,
+    inspection_id: UUID | None = None,
+    event_type: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> ZoneDecisionLogListResponse:
+    """Append-only operator and system decisions for an ``asset_zone_id`` (newest first)."""
+    rows, total = list_zone_decision_log(
+        db=db,
+        asset_zone_id=asset_zone_id,
+        org_id=org_id,
+        inspection_id=inspection_id,
+        event_type=event_type,
+        created_from=created_from,
+        created_to=created_to,
+        limit=limit,
+        offset=offset,
+    )
+    return ZoneDecisionLogListResponse(
+        items=[ZoneDecisionLogPublic.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/ingest/inspection-history", response_model=InspectionHistoryListResponse)
+def get_inspection_history(
+    db: DbSession,
+    inspection_id: UUID = Query(...),
+    limit: int = Query(default=500, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
+) -> InspectionHistoryListResponse:
+    """Inspection status transitions oldest-first (audit trail)."""
+    if db.get(Inspection, inspection_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inspection not found")
+    rows, total = list_inspection_history(db=db, inspection_id=inspection_id, limit=limit, offset=offset)
+    return InspectionHistoryListResponse(
+        items=[InspectionHistoryEventPublic.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
     )
 
 

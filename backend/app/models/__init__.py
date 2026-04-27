@@ -5,7 +5,10 @@ from app.models.frame import Frame
 from app.models.inspection import Inspection
 from app.models.maintenance_recommendation import MaintenanceRecommendation
 from app.models.progression_metric import ProgressionMetric
+from app.models.inspection_history_event import InspectionHistoryEvent
 from app.models.issue_state import IssueState, IssueStateEvent
+from app.models.outcome_feedback import OutcomeFeedback
+from app.models.zone_decision_log import ZoneDecisionLog
 from app.models.risk_rule import RiskRule
 
 __all__ = [
@@ -19,4 +22,7 @@ __all__ = [
     "RiskRule",
     "IssueState",
     "IssueStateEvent",
+    "OutcomeFeedback",
+    "ZoneDecisionLog",
+    "InspectionHistoryEvent",
 ]

@@ -13,6 +13,7 @@ from app.models.alignment import Alignment
 from app.models.detection import Detection
 from app.models.inspection import Inspection, InspectionStatus
 from app.services.alignment_matching import match_detection_sets
+from app.services.inspection_history_service import record_inspection_status_transition
 from app.services.asset_zone import build_asset_zone_id
 from app.services.change_detection import build_change_events
 from app.services.geo import haversine_meters
@@ -91,8 +92,17 @@ def run_alignment_for_inspection(
     inspection = db.get(Inspection, inspection_id)
     if inspection is None:
         raise ValueError(f"Inspection {inspection_id} not found")
+    prev_status = inspection.status
     inspection.status = InspectionStatus.processing_alignment
     db.add(inspection)
+    record_inspection_status_transition(
+        db=db,
+        inspection_id=inspection.id,
+        from_status=prev_status,
+        to_status=InspectionStatus.processing_alignment,
+        source="worker",
+        context={"stage": "alignment"},
+    )
     db.commit()
     try:
         baseline = _select_baseline_inspection(db, inspection, settings)
@@ -103,8 +113,17 @@ def run_alignment_for_inspection(
         if baseline is None:
             inspection.aligned_pair_count = 0
             inspection.change_event_count = 0
+            prev_nb = inspection.status
             inspection.status = InspectionStatus.alignment_ready
             db.add(inspection)
+            record_inspection_status_transition(
+                db=db,
+                inspection_id=inspection.id,
+                from_status=prev_nb,
+                to_status=InspectionStatus.alignment_ready,
+                source="worker",
+                context={"stage": "alignment", "baseline": None},
+            )
             db.commit()
             return 0, 0
 
@@ -154,21 +173,39 @@ def run_alignment_for_inspection(
 
         inspection.aligned_pair_count = pair_count
         inspection.change_event_count = event_count
+        prev_ok = inspection.status
         inspection.status = InspectionStatus.alignment_ready
         metadata = dict(inspection.extra_metadata or {})
         metadata.pop("alignment_error", None)
         inspection.extra_metadata = metadata or None
         db.add(inspection)
+        record_inspection_status_transition(
+            db=db,
+            inspection_id=inspection.id,
+            from_status=prev_ok,
+            to_status=InspectionStatus.alignment_ready,
+            source="worker",
+            context={"stage": "alignment", "pairs": pair_count, "change_events": event_count},
+        )
         db.commit()
         return pair_count, event_count
     except Exception as exc:
         db.rollback()
         inspection = db.get(Inspection, inspection_id)
         if inspection is not None:
+            prev_fail = inspection.status
             inspection.status = InspectionStatus.alignment_failed
             metadata = dict(inspection.extra_metadata or {})
             metadata["alignment_error"] = str(exc)
             inspection.extra_metadata = metadata
             db.add(inspection)
+            record_inspection_status_transition(
+                db=db,
+                inspection_id=inspection.id,
+                from_status=prev_fail,
+                to_status=InspectionStatus.alignment_failed,
+                source="worker",
+                context={"stage": "alignment", "error": str(exc)[:500]},
+            )
             db.commit()
         raise

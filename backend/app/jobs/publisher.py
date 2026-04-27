@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.jobs.messages import IngestJobMessage
 from app.models.inspection import Inspection, InspectionStatus
+from app.services.inspection_history_service import record_inspection_status_transition
 
 log = logging.getLogger(__name__)
 
@@ -55,15 +56,33 @@ def publish_ingest_job(
             MessageBody=msg.model_dump_json(),
         )
     except Exception as e:
+        prev_status = inspection.status
         inspection.status = InspectionStatus.stored_pending_queue
         inspection.last_queue_error = str(e)
         db.add(inspection)
+        record_inspection_status_transition(
+            db=db,
+            inspection_id=inspection.id,
+            from_status=prev_status,
+            to_status=InspectionStatus.stored_pending_queue,
+            source="api",
+            context={"stage": "sqs_publish", "error": str(e)[:500]},
+        )
         db.commit()
         log.exception("SQS publish failed for inspection %s", inspection.id)
         return False
 
+    prev_status = inspection.status
     inspection.status = InspectionStatus.queued
     inspection.last_queue_error = None
     db.add(inspection)
+    record_inspection_status_transition(
+        db=db,
+        inspection_id=inspection.id,
+        from_status=prev_status,
+        to_status=InspectionStatus.queued,
+        source="api",
+        context={"stage": "sqs_publish"},
+    )
     db.commit()
     return True

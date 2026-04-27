@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.inspection import Inspection
 from app.models.issue_state import IssueState, IssueStateEvent
 from app.services.issue_key import build_issue_key
+from app.services.zone_decision_log_service import append_zone_decision_log
 
 ALLOWED_STATES = frozenset({"fixed", "monitoring", "deferred", "ignored"})
 
@@ -96,15 +97,35 @@ def upsert_issue_state(
         )
         db.add(row)
         db.flush()
+        ev_id = uuid.uuid4()
         db.add(
             IssueStateEvent(
-                id=uuid.uuid4(),
+                id=ev_id,
                 issue_state_id=row.id,
                 from_state=None,
                 to_state=st,
                 actor=updated_by,
                 context=None,
             )
+        )
+        summary = f"Issue {key} in {zone}: new → {st}"
+        refs: dict[str, object | None] = {
+            "issue_state_id": str(row.id),
+            "issue_state_event_id": str(ev_id),
+            "from_state": None,
+            "to_state": st,
+            "actor": updated_by,
+            "issue_key": key,
+        }
+        append_zone_decision_log(
+            db=db,
+            org_id=org_id,
+            asset_zone_id=zone,
+            event_type="issue_state_transition",
+            issue_key=key,
+            inspection_id=last_target_inspection_id,
+            issue_state_event_id=ev_id,
+            payload={"summary": summary, "refs": refs},
         )
         db.commit()
         db.refresh(row)
@@ -123,15 +144,35 @@ def upsert_issue_state(
     row.updated_at = now
     db.add(row)
     if prev != st:
+        ev_id = uuid.uuid4()
         db.add(
             IssueStateEvent(
-                id=uuid.uuid4(),
+                id=ev_id,
                 issue_state_id=row.id,
                 from_state=prev,
                 to_state=st,
                 actor=updated_by,
                 context=None,
             )
+        )
+        summary = f"Issue {key} in {zone}: {prev} → {st}"
+        refs = {
+            "issue_state_id": str(row.id),
+            "issue_state_event_id": str(ev_id),
+            "from_state": prev,
+            "to_state": st,
+            "actor": updated_by,
+            "issue_key": key,
+        }
+        append_zone_decision_log(
+            db=db,
+            org_id=org_id,
+            asset_zone_id=zone,
+            event_type="issue_state_transition",
+            issue_key=key,
+            inspection_id=last_target_inspection_id,
+            issue_state_event_id=ev_id,
+            payload={"summary": summary, "refs": refs},
         )
     db.commit()
     db.refresh(row)

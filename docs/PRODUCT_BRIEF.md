@@ -55,11 +55,11 @@ IIE is designed as a modular, cloud-native pipeline where each layer can scale i
 
 ## Repository note
 
-The `backend/` package currently implements the **ingestion + frame extraction + detection + temporal alignment + progression metrics + temporal insights + maintenance recommendations + configurable risk rules + operator issue state** slices:
+The `backend/` package currently implements the **ingestion + frame extraction + detection + temporal alignment + progression metrics + temporal insights + maintenance recommendations + configurable risk rules + operator issue state + operator outcome feedback + zone decision log + inspection history** slices:
 
 - FastAPI upload and presigned-S3 ingestion flows
-- PostgreSQL inspection, frame, detection, alignment-pair, change-event, progression-metric, **maintenance_recommendation**, **`risk_rules`** (JSON match/effect evaluated during recommendation scoring), and **`issue_states`** with append-only **`issue_state_events`** (operator disposition per zone + `issue_key`, independent of pipeline rows)
+- PostgreSQL inspection, frame, detection, alignment-pair, change-event, progression-metric, **maintenance_recommendation**, **`risk_rules`** (JSON match/effect evaluated during recommendation scoring), **`issue_states`** with append-only **`issue_state_events`**, append-only **`outcome_feedbacks`**, append-only **`zone_decision_logs`** (audited decisions per `asset_zone_id` with denormalized recommendation snapshots), and append-only **`inspection_history_events`** (inspection status transitions)
 - S3 storage for source media and extracted frame JPEGs; optional presigned GETs for change-map overlays
-- Optional SQS job publish for asynchronous worker processing (extraction -> detection -> alignment -> progression -> **recommendations** with DB-backed risk rules); change maps, timelines, and trends remain **read** APIs over persisted data; **`PUT /issues/state`** and **`GET /issues`** record and list workflow state (`fixed`, `monitoring`, `deferred`, `ignored`) without the worker mutating those tables
+- Optional SQS job publish for asynchronous worker processing (extraction -> detection -> alignment -> progression -> **recommendations** with DB-backed risk rules); change maps, timelines, and trends remain **read** APIs over persisted data; **`PUT /issues/state`** and **`GET /issues`** record and list workflow state (`fixed`, `monitoring`, `deferred`, `ignored`) without the worker mutating those tables; **`POST /outcomes`** and **`GET /outcomes`** capture and list operator outcomes separately; **`GET /ingest/zone-decision-log`** and **`GET /ingest/inspection-history`** expose decision and lifecycle logs
 
 See [INGEST_API.md](INGEST_API.md) for the live API and worker contract.

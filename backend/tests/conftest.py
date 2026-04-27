@@ -17,6 +17,9 @@ from app.models.frame import Frame  # noqa: F401 - register metadata
 from app.models.inspection import Inspection  # noqa: F401 - register metadata
 from app.models.maintenance_recommendation import MaintenanceRecommendation  # noqa: F401 - register metadata
 from app.models.issue_state import IssueState, IssueStateEvent  # noqa: F401 - register metadata
+from app.models.outcome_feedback import OutcomeFeedback  # noqa: F401 - register metadata
+from app.models.zone_decision_log import ZoneDecisionLog  # noqa: F401 - register metadata
+from app.models.inspection_history_event import InspectionHistoryEvent  # noqa: F401 - register metadata
 from app.models.risk_rule import RiskRule  # noqa: F401 - register metadata
 from app.models.progression_metric import ProgressionMetric  # noqa: F401 - register metadata
 from app.db.session import reset_engine

@@ -19,6 +19,8 @@ from app.models.inspection import Inspection, InspectionStatus
 from app.models.maintenance_recommendation import MaintenanceRecommendation
 from app.models.progression_metric import ProgressionMetric
 from app.services.asset_zone import build_asset_zone_id
+from app.services.outcome_feedback_service import zone_feedback_score_adjustment
+from app.services.zone_decision_log_service import append_zone_decision_log, truncate_rationale_for_payload
 from app.services.recommendation_rules import (
     priority_label_for_score,
     score_zone,
@@ -179,6 +181,16 @@ def run_recommendations_for_inspection(
                 }
             ]
             summary = f"Review zone {z}"
+        adj, fb_factors = zone_feedback_score_adjustment(
+            db=db,
+            settings=settings,
+            inspection=inspection,
+            zone_id=z,
+            zone_detections=dets,
+        )
+        if adj != 0.0:
+            s = min(float(settings.risk_rules_score_max), max(0.0, float(s) + adj))
+            factors = factors + fb_factors
         scored.append((z, s, factors, summary, sla_mul))
 
     scored.sort(key=lambda row: (-row[1], row[0]))  # score, zone_id
@@ -193,26 +205,52 @@ def run_recommendations_for_inspection(
             label = priority_label_for_score(settings=settings, score=pscore)
             days = sla_days_for_label(settings=settings, label=label) * sla_mul
             sla_at = t_eff + timedelta(seconds=days * 86400.0)
+            rat = rationale or [
+                {
+                    "kind": "baseline",
+                    "message": "Zone included from alignment or change tracking with neutral score",
+                    "refs": {"zone_id": zone_id},
+                }
+            ]
+            mr_id = uuid.uuid4()
             db.add(
                 MaintenanceRecommendation(
-                    id=uuid.uuid4(),
+                    id=mr_id,
                     target_inspection_id=inspection.id,
                     asset_zone_id=zone_id,
                     priority_rank=rank,
                     priority_label=label,
                     priority_score=pscore,
                     action_summary=action_summary[:512],
-                    rationale=rationale
-                    or [
-                        {
-                            "kind": "baseline",
-                            "message": "Zone included from alignment or change tracking with neutral score",
-                            "refs": {"zone_id": zone_id},
-                        }
-                    ],
+                    rationale=rat,
                     sla_target_at=sla_at,
                     sla_days_suggested=days,
                 )
+            )
+            summary = (
+                f"Recommendation rank {rank} for inspection {inspection.id}: "
+                f"{label} score={pscore:.1f} — {action_summary[:120]}"
+            )
+            append_zone_decision_log(
+                db=db,
+                org_id=inspection.org_id,
+                asset_zone_id=zone_id,
+                event_type="maintenance_recommendation",
+                inspection_id=inspection.id,
+                maintenance_recommendation_id=mr_id,
+                payload={
+                    "summary": summary,
+                    "refs": {
+                        "maintenance_recommendation_id": str(mr_id),
+                        "target_inspection_id": str(inspection.id),
+                        "asset_zone_id": zone_id,
+                        "priority_rank": rank,
+                        "priority_label": label,
+                        "priority_score": pscore,
+                        "action_summary": action_summary[:512],
+                        "rationale": truncate_rationale_for_payload(rat),
+                    },
+                },
             )
             n_written += 1
         if truncated:

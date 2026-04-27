@@ -163,6 +163,32 @@ class Settings(BaseSettings):
         description="Clamp final zone score after risk rule multipliers/additions.",
     )
 
+    feedback_score_enabled: bool = Field(
+        default=False,
+        description="When true, recommendation scoring applies a bounded prior from outcome_feedbacks.",
+    )
+    feedback_score_lookback_days: int = Field(
+        default=90,
+        ge=1,
+        le=3650,
+        description="Window for aggregating operator outcomes into the score prior.",
+    )
+    feedback_score_min_samples: int = Field(
+        default=3,
+        ge=1,
+        description="Minimum directional outcome rows before applying a score prior.",
+    )
+    feedback_score_max_delta: float = Field(
+        default=8.0,
+        ge=0.0,
+        description="Absolute cap on the additive score adjustment from operator feedback.",
+    )
+    feedback_score_step: float = Field(
+        default=2.0,
+        ge=0.0,
+        description="Multiplier on net directional signals (raise minus lower) before clamping.",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

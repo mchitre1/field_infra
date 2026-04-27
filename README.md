@@ -4,7 +4,7 @@ Backend services for converting visual inspection media (drone, mobile, fixed ca
 
 ## Implemented today
 
-The backend currently implements nine connected slices under `backend/`:
+The backend currently implements eleven connected slices under `backend/`:
 
 - **Ingestion (feature 0001):** multipart and presigned uploads persist inspections, store source media in S3, and publish ingest jobs to SQS when configured.
 - **Frame extraction (feature 0002):** a worker consumes ingest jobs, extracts frames from image/video media, stores frame JPEGs in S3, and persists frame-level metadata for downstream analysis.
@@ -15,6 +15,8 @@ The backend currently implements nine connected slices under `backend/`:
 - **Maintenance recommendations (feature 0007):** after progression, the worker builds rule-based **prioritized recommendations** per `asset_zone_id` (score, label, rationale JSON, SLA target from inspection effective time + configured days), persists `maintenance_recommendations` rows, and exposes a paginated read API.
 - **Configurable risk rules (feature 0008):** PostgreSQL `risk_rules` rows (JSON `match` / `effect`) refine scores and SLA multipliers per zone during recommendation generation; optional `/risk-rules` CRUD for internal ops.
 - **Issue state (feature 0009):** operators record disposition per logical issue (`asset_zone_id` + `issue_key`) as `fixed`, `monitoring`, `deferred`, or `ignored`, with append-only event history; `PUT /issues/state` and `GET /issues` (see [docs/INGEST_API.md](docs/INGEST_API.md#issue-state-feature-0009)).
+- **Operator outcomes (feature 0010):** append-only `outcome_feedbacks` rows (`outcome_kind` / `outcome_code`, optional detection and recommendation snapshots) via `POST /outcomes` and `GET /outcomes`; optional bounded score prior after risk rules during recommendations when `FEEDBACK_SCORE_ENABLED` is true (see [docs/INGEST_API.md](docs/INGEST_API.md#operator-outcomes-feature-0010)).
+- **Zone decision log and inspection history (feature 0011):** append-only `zone_decision_logs` (issue transitions, outcomes, recommendation snapshots per zone) and `inspection_history_events` (status transitions); `GET /ingest/zone-decision-log` and `GET /ingest/inspection-history` (see [docs/INGEST_API.md](docs/INGEST_API.md#zone-decision-log-and-inspection-history-feature-0011)).
 
 API details, worker behavior, request examples, and configuration are in [docs/INGEST_API.md](docs/INGEST_API.md).
 

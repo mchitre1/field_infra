@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.jobs.publisher import publish_ingest_job
 from app.models.inspection import Inspection, InspectionStatus, SourceType
+from app.services.inspection_history_service import record_inspection_status_transition
 from app.schemas.ingest import PresignRequest, PresignResponse
 from app.services import storage
 
@@ -264,8 +265,17 @@ def complete_presigned_ingest(
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail="Stored object exceeds limit")
 
     inspection.byte_size = size
+    prev_status = inspection.status
     inspection.status = InspectionStatus.stored
     db.add(inspection)
+    record_inspection_status_transition(
+        db=db,
+        inspection_id=inspection.id,
+        from_status=prev_status,
+        to_status=InspectionStatus.stored,
+        source="api",
+        context={"stage": "complete_presigned_ingest", "byte_size": size},
+    )
     db.commit()
     db.refresh(inspection)
 

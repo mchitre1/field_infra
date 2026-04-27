@@ -11,6 +11,7 @@ from app.models.detection import Detection
 from app.models.frame import Frame
 from app.models.inspection import Inspection, InspectionStatus
 from app.services import storage
+from app.services.inspection_history_service import record_inspection_status_transition
 from app.services.detection_inference import run_frame_detection
 
 
@@ -40,8 +41,17 @@ def run_detection_for_inspection(
     if inspection is None:
         raise ValueError(f"Inspection {inspection_id} not found")
 
+    prev_status = inspection.status
     inspection.status = InspectionStatus.processing_detections
     db.add(inspection)
+    record_inspection_status_transition(
+        db=db,
+        inspection_id=inspection.id,
+        from_status=prev_status,
+        to_status=InspectionStatus.processing_detections,
+        source="worker",
+        context={"stage": "detection"},
+    )
     db.commit()
 
     try:
@@ -101,21 +111,39 @@ def run_detection_for_inspection(
                 count += 1
 
         inspection.detection_count = count
+        prev_ok = inspection.status
         inspection.status = InspectionStatus.detections_ready
         metadata = dict(inspection.extra_metadata or {})
         metadata.pop("detection_error", None)
         inspection.extra_metadata = metadata or None
         db.add(inspection)
+        record_inspection_status_transition(
+            db=db,
+            inspection_id=inspection.id,
+            from_status=prev_ok,
+            to_status=InspectionStatus.detections_ready,
+            source="worker",
+            context={"stage": "detection", "detection_count": count},
+        )
         db.commit()
         return count
     except Exception as exc:
         db.rollback()
         inspection = db.get(Inspection, inspection_id)
         if inspection is not None:
+            prev_fail = inspection.status
             inspection.status = InspectionStatus.detections_failed
             metadata = dict(inspection.extra_metadata or {})
             metadata["detection_error"] = str(exc)
             inspection.extra_metadata = metadata
             db.add(inspection)
+            record_inspection_status_transition(
+                db=db,
+                inspection_id=inspection.id,
+                from_status=prev_fail,
+                to_status=InspectionStatus.detections_failed,
+                source="worker",
+                context={"stage": "detection", "error": str(exc)[:500]},
+            )
             db.commit()
         raise

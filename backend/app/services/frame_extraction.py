@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.models.frame import Frame
 from app.models.inspection import Inspection, InspectionStatus
+from app.services.inspection_history_service import record_inspection_status_transition
 from app.services import storage
 
 log = logging.getLogger(__name__)
@@ -116,8 +117,17 @@ def extract_and_store_frames(
     if existing and inspection.status == InspectionStatus.frames_extracted:
         return int(inspection.frame_count or 0)
 
+    prev_status = inspection.status
     inspection.status = InspectionStatus.processing_frames
     db.add(inspection)
+    record_inspection_status_transition(
+        db=db,
+        inspection_id=inspection.id,
+        from_status=prev_status,
+        to_status=InspectionStatus.processing_frames,
+        source="worker",
+        context={"stage": "frame_extraction"},
+    )
     db.commit()
 
     try:
@@ -183,6 +193,7 @@ def extract_and_store_frames(
             )
 
         inspection.frame_count = len(frames)
+        prev_ok = inspection.status
         inspection.status = InspectionStatus.frames_extracted
         if inspection.extra_metadata:
             inspection.extra_metadata = {
@@ -195,17 +206,34 @@ def extract_and_store_frames(
             inspection.video_fps = float(video_summary.get("video_fps") or 0)
             inspection.video_codec = str(video_summary.get("video_codec") or "unknown")
         db.add(inspection)
+        record_inspection_status_transition(
+            db=db,
+            inspection_id=inspection.id,
+            from_status=prev_ok,
+            to_status=InspectionStatus.frames_extracted,
+            source="worker",
+            context={"stage": "frame_extraction", "frame_count": len(frames)},
+        )
         db.commit()
         return len(frames)
     except Exception as exc:
         db.rollback()
         inspection = db.get(Inspection, inspection_id)
         if inspection is not None:
+            prev_fail = inspection.status
             inspection.status = InspectionStatus.frames_failed
             metadata = dict(inspection.extra_metadata or {})
             metadata["frame_extraction_error"] = str(exc)
             inspection.extra_metadata = metadata
             db.add(inspection)
+            record_inspection_status_transition(
+                db=db,
+                inspection_id=inspection.id,
+                from_status=prev_fail,
+                to_status=InspectionStatus.frames_failed,
+                source="worker",
+                context={"stage": "frame_extraction", "error": str(exc)[:500]},
+            )
             db.commit()
         log.exception("Frame extraction failed for inspection %s", inspection_id)
         raise

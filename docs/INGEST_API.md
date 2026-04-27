@@ -1,4 +1,4 @@
-# Ingestion through configurable risk rules API (features 0001-0009)
+# Ingestion and maintenance intelligence API (features 0001-0011)
 
 The ingestion layer accepts **images and video** with metadata, writes source objects to **Amazon S3**, records inspections in **PostgreSQL**, and sends a JSON job to **Amazon SQS** when `SQS_QUEUE_URL` is set.
 
@@ -17,6 +17,10 @@ Feature 0007 adds **maintenance recommendations**: after progression, the worker
 Feature 0008 adds **persisted `risk_rules`** (JSON `match` + `effect` rows) evaluated during that same recommendation pass: base score still comes from feature 0007 settings; matching rules apply **additive** `score_add`, **multiplicative** `score_multiplier`, and **multiplicative** `sla_days_multiplier` on the SLA chosen for the final priority label. Internal ops APIs under `/risk-rules` manage rows (no auth in v1).
 
 Feature 0009 adds **human-curated issue state** per logical issue (`asset_zone_id` + stable `issue_key`): operators set `fixed`, `monitoring`, `deferred`, or `ignored` (optional `notes`, optional `last_target_inspection_id`). Rows are keyed by **`org_scope`**—the string form of `org_id` when set, or the literal **`global`** when `org_id` is omitted—so the same zone key can exist once per org and once globally. Append-only **`issue_state_events`** record transitions (including initial create) for audit. The ingest worker does **not** create or update `issue_states`; only the HTTP API does.
+
+Feature 0010 adds append-only **`outcome_feedbacks`**: structured **`outcome_kind`** (`model_label`, `risk_priority`, `general`) and **`outcome_code`** for MLOps export and, when enabled via settings, a **bounded additive score prior** after persisted **`risk_rules`** during the maintenance recommendation pass (rationale gains a synthetic `operator_feedback` factor). Clients should **`POST /outcomes`** explicitly when recording outcomes (not auto-linked from **`PUT /issues/state`** in v1).
+
+Feature 0011 adds append-only **`zone_decision_logs`** (issue transitions, operator outcomes, and **per-row maintenance recommendation snapshots** so history survives recommendation replace) and append-only **`inspection_history_events`** (inspection **status** transitions from API and worker paths). **`GET /ingest/zone-decision-log`** lists zone-scoped decisions (default **newest first**). **`GET /ingest/inspection-history`** lists status transitions for one inspection (**oldest first**). **`GET /ingest/timeline`** remains change events + progression metrics only (not merged with decision logs in v1).
 
 The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped from SQLAlchemy rows.
 
@@ -45,8 +49,12 @@ The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped fro
 | `PATCH` | `/risk-rules/{rule_id}` | Partial update of a risk rule |
 | `PUT` | `/issues/state` | Upsert issue state (`issue_key` or `detection_type` + `class_name` + optional `subtype`; body includes `asset_zone_id`, `state`, optional `org_id`, `notes`, `last_target_inspection_id`, `updated_by`) |
 | `GET` | `/issues` | List issue states with filters (`org_id`, `asset_zone_id`, `state`), pagination, optional `include_events=true` |
+| `POST` | `/outcomes` | Append one operator outcome row (**201**; `outcome_kind`, `outcome_code`, `asset_zone_id`, `issue_key` or `detection_type` + `class_name` + optional `subtype`; optional anchors and recommendation snapshot fields) |
+| `GET` | `/outcomes` | Paginated list for export (`created_from`, `created_to`, `org_id`, `asset_zone_id`, `issue_key`, `outcome_kind`, `target_inspection_id`, `model_name`, `model_version`) |
+| `GET` | `/ingest/zone-decision-log` | Append-only decision log for an `asset_zone_id` (optional `org_id`, `inspection_id`, `event_type`, time range, pagination; newest first) |
+| `GET` | `/ingest/inspection-history` | Status transition log for one `inspection_id` (oldest first; **404** if inspection missing) |
 
-**`/issues` routes:** No authentication in v1—treat as internal-only (same posture as `/risk-rules`).
+**`/issues`**, **`/outcomes`**, **`GET /ingest/zone-decision-log`**, and **`GET /ingest/inspection-history`:** No authentication in v1—treat as internal-only (same posture as `/risk-rules`).
 
 Correlation: send `X-Request-ID` or `X-Correlation-ID`; the response echoes `X-Request-ID`. Logs include the correlation id.
 
@@ -180,7 +188,7 @@ Current behavior:
     - elapsed time uses each inspection’s `capture_timestamp` when set, otherwise `created_at`
     - crack size proxy is controlled by `progression_crack_metric` (`bbox_width` \| `bbox_area` \| `max_extent`); vegetation v1 uses normalized bbox area only
 12. Set `progression_metric_count` to the number of metric rows written (may be `0` if no eligible pairs).
-13. When status is still `alignment_ready`, run **maintenance recommendations**: delete existing `maintenance_recommendations` for the target inspection, recompute rows per `asset_zone_id` using base settings scoring plus persisted **`risk_rules`** (`match` / `effect`), set `recommendation_count`, and clear `metadata.recommendation_error` on success. On recommendation failure, set `metadata.recommendation_error` and `recommendation_count=0` without failing the worker job.
+13. When status is still `alignment_ready`, run **maintenance recommendations**: delete existing `maintenance_recommendations` for the target inspection, recompute rows per `asset_zone_id` using base settings scoring plus persisted **`risk_rules`** (`match` / `effect`), then optionally a **bounded operator-outcome score prior** when **`FEEDBACK_SCORE_ENABLED`** is true (aggregates append-only **`outcome_feedbacks`** after rules; see **Operator outcomes**). Each persisted recommendation row also appends **`zone_decision_logs`** with **`event_type`=`maintenance_recommendation`** (denormalized snapshot; see **Zone decision log**). Then set `recommendation_count`, and clear `metadata.recommendation_error` on success. On recommendation failure, set `metadata.recommendation_error` and `recommendation_count=0` without failing the worker job.
 
 On extraction failure, status is `frames_failed` and error is stored in `inspection.metadata.frame_extraction_error`.
 On detection failure, status is `detections_failed` and error is stored in `inspection.metadata.detection_error`.
@@ -371,6 +379,52 @@ curl -sS -X PUT "http://127.0.0.1:8000/issues/state" \
 curl -sS "http://127.0.0.1:8000/issues?org_id=<uuid>&asset_zone_id=site%3Adefect%3Acrack%3A1%3A2&include_events=true"
 ```
 
+## Operator outcomes (feature 0010)
+
+**Purpose:** Capture user outcomes for **offline** model calibration (via `primary_detection_id`, `detection_refs`, and denormalized `model_name` / `model_version` when a primary detection is supplied) and for **online** risk-score refinement (optional; see settings below). Rows are **append-only** (no updates). **`org_scope`** matches issue state: `str(org_id)` when `org_id` is set, else **`global`**.
+
+**Codes by `outcome_kind`:**
+
+- **`model_label`:** `false_positive`, `false_negative`, `severity_understated`, `severity_overstated`, `confirmed`, `other`
+- **`risk_priority`:** `priority_too_high`, `priority_too_low`, `confirmed`, `other`
+- **`general`:** `confirmed`, `other`
+
+**`POST /outcomes`:** Returns **201**. Unknown `outcome_kind` / disallowed `outcome_code` for that kind → **422**. **`target_inspection_id`** or **`primary_detection_id`** or each **`detection_refs[].detection_id`** missing in DB → **404** (or **422** for malformed refs). When both **`primary_detection_id`** and **`target_inspection_id`** are set, the detection must belong to that inspection (**422** otherwise). Optional **`issue_state_id`** / **`issue_state_event_id`** must agree with **`org_id`**, **`asset_zone_id`**, and resolved **`issue_key`** or the request fails with **422**/**404** as implemented.
+
+**`GET /outcomes`:** Same list filters as the OpenAPI query params. Optional **`org_id`** limits rows to that org’s `org_scope`; when omitted, **no** `org_scope` filter is applied—narrow with `asset_zone_id`, time range, `outcome_kind`, etc.
+
+**Recommendation snapshot:** `maintenance_recommendations` are **replaced** on each successful worker recommendation run, so the API stores optional **`captured_priority_label`** and **`captured_priority_score`** at submit time. If omitted and both **`target_inspection_id`** and **`asset_zone_id`** are set, the server **best-effort** fills them from the current recommendation row for that inspection + zone (if any); otherwise nulls.
+
+**Scoring integration:** **`score_zone`** runs first (base score + persisted **`risk_rules`** and SLA multiplier). Then, if **`FEEDBACK_SCORE_ENABLED`** is true, a bounded **additive** adjustment may change the zone’s **priority score** (and thus label); **`sla_days_multiplier`** from risk rules is **not** changed by feedback in v1. The engine aggregates append-only outcomes in **`FEEDBACK_SCORE_LOOKBACK_DAYS`** matching **`org_scope`**, **`asset_zone_id`**, and **`issue_key`** in the set **`build_issue_key(detection_type, class_name)`** for **defect** and **environmental_hazard** detections in that zone (`subtype` **default**). If the zone has **no** such keys, **all** outcomes for that zone and scope in the window are counted. Directional rows are: lower-priority signals (`priority_too_high`, `false_positive`, `severity_overstated`) vs raise-priority signals (`priority_too_low`, `false_negative`, `severity_understated`). Let `down` / `up` be their counts; if `down + up < FEEDBACK_SCORE_MIN_SAMPLES`, no prior is applied. Otherwise `adjustment = clamp((up - down) * FEEDBACK_SCORE_STEP, -FEEDBACK_SCORE_MAX_DELTA, +FEEDBACK_SCORE_MAX_DELTA)`. When non-zero, **`rationale`** gains a synthetic factor **`kind`: `operator_feedback`**. Disabled by default (`FEEDBACK_SCORE_ENABLED=false`).
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8000/outcomes" \
+  -H "Content-Type: application/json" \
+  -d '{"org_id":"<uuid>","asset_zone_id":"site:defect:crack:1:2","issue_key":"defect:crack:default","outcome_kind":"risk_priority","outcome_code":"priority_too_high","target_inspection_id":"<uuid>","actor":"ops@example.com"}'
+
+curl -sS "http://127.0.0.1:8000/outcomes?org_id=<uuid>&outcome_kind=risk_priority&limit=100"
+```
+
+## Zone decision log and inspection history (feature 0011)
+
+**`zone_decision_logs`:** Append-only rows keyed by **`asset_zone_id`** (and optional **`issue_key`**). Each row has **`event_type`**, JSON **`payload`** with **`summary`** and **`refs`** (UUIDs and denormalized fields for audit), optional nullable FKs (**`issue_state_event_id`**, **`outcome_feedback_id`**, **`maintenance_recommendation_id`**) that **`SET NULL`** on upstream delete, and **`org_id`** stored **as captured at write time** (nullable for global-scoped issue/outcome requests; recommendation rows use the target inspection’s org).
+
+**Write hooks (same transaction as the originating insert):** **`PUT /issues/state`** appends **`issue_state_transition`** after each new **`IssueStateEvent`** (initial create and real state changes only—note-only updates skip a new event and **no** extra log line). **`inspection_id`** on the log row is set to **`last_target_inspection_id`** when the client supplied it, else null. **`POST /outcomes`** appends **`operator_outcome`** after **`OutcomeFeedback`** insert. The recommendation worker appends one **`maintenance_recommendation`** row per persisted recommendation line; **`payload.refs.rationale`** is the full rationale list unless JSON serialization exceeds **8000** characters, in which case a truncated **`{"truncated": true, "preview": "..."}`** object is stored instead.
+
+**`event_type` (v1):** `issue_state_transition`, `operator_outcome`, `maintenance_recommendation`.
+
+**`GET /ingest/zone-decision-log`:** Required **`asset_zone_id`**. Optional **`org_id`** filters to rows whose stored **`org_id`** equals that UUID; when **`org_id` is omitted**, **no** org filter is applied (same pattern as **`GET /issues`** / **`GET /outcomes`**—narrow with **`asset_zone_id`**, **`inspection_id`**, **`event_type`**, or time range). Ordering **`created_at` DESC, `id` DESC** (newest first). Pagination: **`limit`** (default `100`, max `1000`), **`offset`**.
+
+**`inspection_history_events`:** Separate append-only stream for **`Inspection.status`** only (not merged into **`GET /ingest/timeline`**, which stays change events + progression metrics). Rows are written when status **actually changes** (`record_inspection_status_transition`); **`source`** is **`worker`** (frame extraction, detection, alignment) or **`api`** (e.g. presign **`received` → `stored`**, SQS publish **`stored` → `queued`** / **`stored_pending_queue`**). Progression and recommendation passes do **not** change inspection status, so they do **not** emit history rows here.
+
+**`GET /ingest/inspection-history`:** Required **`inspection_id`**; returns **404** if the inspection does not exist. **Oldest first** (`created_at` ASC). Pagination: **`limit`** (default `500`, max `2000`), **`offset`**.
+
+```bash
+curl -sS "http://127.0.0.1:8000/ingest/zone-decision-log?asset_zone_id=site%3Adefect%3Acrack%3A1%3A2&org_id=<uuid>&limit=50"
+
+curl -sS "http://127.0.0.1:8000/ingest/inspection-history?inspection_id=<uuid>"
+```
+
 ## Configuration
 
 Environment variables are loaded via `pydantic-settings` (optional `.env` in the working directory). Common settings:
@@ -419,6 +473,11 @@ Environment variables are loaded via `pydantic-settings` (optional `.env` in the
 | `RISK_RULES_DEFAULT_ORG_BEHAVIOR` | `merge_global_then_org` (default) or `global_only` |
 | `RISK_RULES_MAX_ROWS_PER_EVAL` | Max `risk_rules` rows evaluated per recommendation run (default `500`) |
 | `RISK_RULES_SCORE_MAX` | Upper clamp on post-rule zone score (default `500`) |
+| `FEEDBACK_SCORE_ENABLED` | When `true`, apply operator-outcome prior to recommendation zone scores after risk rules (default `false`) |
+| `FEEDBACK_SCORE_LOOKBACK_DAYS` | Aggregation window for that prior (default `90`) |
+| `FEEDBACK_SCORE_MIN_SAMPLES` | Minimum directional outcome rows before applying the prior (default `3`) |
+| `FEEDBACK_SCORE_MAX_DELTA` | Absolute cap on the additive score adjustment (default `8`) |
+| `FEEDBACK_SCORE_STEP` | Scale factor on net directional counts before clamping (default `2`) |
 
 Allowed MIME types default to `image/jpeg`, `image/png`, `video/mp4`, `video/quicktime`. Override via settings if the project extends the allowlist.
 
