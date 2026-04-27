@@ -14,6 +14,7 @@ from app.models.change_event import ChangeEvent
 from app.models.detection import Detection, DetectionType
 from app.models.frame import Frame
 from app.models.inspection import Inspection, SourceType
+from app.models.maintenance_recommendation import MaintenanceRecommendation
 from app.models.progression_metric import ProgressionMetric
 from app.schemas.alignment import (
     AlignmentCompareResponse,
@@ -31,6 +32,7 @@ from app.schemas.progression import (
     ProgressionMetricSummaryItem,
     ProgressionSummaryResponse,
 )
+from app.schemas.recommendations import PaginatedRecommendationsResponse, RecommendationPublic
 from app.schemas.temporal_insights import ChangeMapResponse, TimelineEntry, TrendSummaryResponse
 from app.services import anomaly_timeline as anomaly_timeline_service
 from app.services import change_map as change_map_service
@@ -346,6 +348,46 @@ def list_progression_metrics(
     ).all()
     return PaginatedProgressionMetricsResponse(
         items=[ProgressionMetricPublic.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/ingest/{inspection_id}/recommendations",
+    response_model=PaginatedRecommendationsResponse,
+)
+def list_recommendations(
+    inspection_id: UUID,
+    db: DbSession,
+    asset_zone_id: str | None = None,
+    priority_label: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> PaginatedRecommendationsResponse:
+    """List persisted maintenance recommendations for a target inspection."""
+    if db.get(Inspection, inspection_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inspection not found")
+    stmt = select(MaintenanceRecommendation).where(
+        MaintenanceRecommendation.target_inspection_id == inspection_id
+    )
+    if asset_zone_id is not None:
+        stmt = stmt.where(MaintenanceRecommendation.asset_zone_id == asset_zone_id.strip())
+    if priority_label is not None:
+        stmt = stmt.where(MaintenanceRecommendation.priority_label == priority_label.strip().lower())
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.scalars(
+        stmt.order_by(
+            MaintenanceRecommendation.priority_rank.asc(),
+            MaintenanceRecommendation.asset_zone_id.asc(),
+            MaintenanceRecommendation.id.asc(),
+        )
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return PaginatedRecommendationsResponse(
+        items=[RecommendationPublic.model_validate(r) for r in rows],
         total=total,
         limit=limit,
         offset=offset,

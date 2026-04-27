@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from app.models.change_event import ChangeEvent
 from app.models.detection import Detection, DetectionType
 from app.models.frame import Frame
 from app.models.inspection import Inspection, InspectionStatus, SourceType
+from app.models.maintenance_recommendation import MaintenanceRecommendation
 from app.models.progression_metric import ProgressionMetric
 
 
@@ -722,3 +724,69 @@ def test_trends_endpoint(client, sqlite_session):
     assert body["metric_name"] == "crack_growth_rate"
     assert len(body["points"]) == 1
     assert body["latest_value"] == 0.02
+
+
+def test_list_recommendations_empty(client, sqlite_session):
+    insp = Inspection(
+        id=UUID("a9a9a9a9-a9a9-a9a9-a9a9-a9a9a9a9a9a9"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint=None,
+        asset_hint=None,
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    sqlite_session.add(insp)
+    sqlite_session.commit()
+    r = client.get(f"/ingest/{insp.id}/recommendations")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 0
+    assert body["items"] == []
+
+
+def test_list_recommendations_with_rows(client, sqlite_session):
+    insp = Inspection(
+        id=UUID("b9b9b9b9-b9b9-b9b9-b9b9-b9b9b9b9b9b9"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint=None,
+        asset_hint=None,
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    sqlite_session.add(insp)
+    sqlite_session.commit()
+
+    sqlite_session.add(
+        MaintenanceRecommendation(
+            id=UUID("c9c9c9c9-c9c9-c9c9-c9c9-c9c9c9c9c9c9"),
+            target_inspection_id=insp.id,
+            asset_zone_id="zone-x",
+            priority_rank=1,
+            priority_label="high",
+            priority_score=50.0,
+            action_summary="Test action",
+            rationale=[{"kind": "test", "message": "m", "refs": {}}],
+            sla_target_at=datetime(2026, 1, 15, tzinfo=timezone.utc),
+            sla_days_suggested=30.0,
+        )
+    )
+    sqlite_session.commit()
+    r = client.get(f"/ingest/{insp.id}/recommendations")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 1
+    assert body["items"][0]["asset_zone_id"] == "zone-x"
+    assert body["items"][0]["priority_label"] == "high"
+
+    r2 = client.get(f"/ingest/{insp.id}/recommendations?priority_label=low")
+    assert r2.json()["total"] == 0

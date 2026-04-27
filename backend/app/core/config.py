@@ -86,6 +86,67 @@ class Settings(BaseSettings):
         description="Max alignment pairs processed per change-map request (oldest pairs dropped when exceeded).",
     )
 
+    recommend_defect_confidence_floor: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Defect detections at or above this max-zone confidence add risk score.",
+    )
+    recommend_weight_defect_confidence: float = Field(
+        default=40.0,
+        description="Weight multiplied by max defect confidence in the zone (when above floor).",
+    )
+    recommend_weight_change_appeared: float = Field(
+        default=18.0,
+        description="Score bump per change event with event_type=appeared.",
+    )
+    recommend_weight_change_disappeared: float = Field(
+        default=10.0,
+        description="Score bump per change event with event_type=disappeared.",
+    )
+    recommend_weight_change_other: float = Field(
+        default=5.0,
+        description="Score bump per other change event type.",
+    )
+    recommend_crack_growth_rate_floor: float = Field(
+        default=0.0005,
+        description="crack_growth_rate values above this add progression risk.",
+    )
+    recommend_weight_crack_growth: float = Field(
+        default=35.0,
+        description="Weight multiplied by crack_growth_rate when above floor (capped internally).",
+    )
+    recommend_vegetation_delta_floor: float = Field(
+        default=0.005,
+        description="vegetation_encroachment_delta values above this add progression risk.",
+    )
+    recommend_weight_vegetation_delta: float = Field(
+        default=22.0,
+        description="Weight multiplied by vegetation_encroachment_delta when above floor (capped).",
+    )
+    recommend_band_critical_min: float = Field(
+        default=80.0,
+        description="priority_score >= this maps to critical.",
+    )
+    recommend_band_high_min: float = Field(
+        default=45.0,
+        description="priority_score >= this maps to high (if not critical).",
+    )
+    recommend_band_medium_min: float = Field(
+        default=15.0,
+        description="priority_score >= this maps to medium.",
+    )
+    recommend_sla_days_critical: float = Field(default=7.0, ge=0.0)
+    recommend_sla_days_high: float = Field(default=30.0, ge=0.0)
+    recommend_sla_days_medium: float = Field(default=90.0, ge=0.0)
+    recommend_sla_days_low: float = Field(default=180.0, ge=0.0)
+    recommend_max_per_inspection: int = Field(
+        default=100,
+        ge=1,
+        le=5000,
+        description="Max maintenance recommendation rows persisted per target inspection.",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -11,15 +11,16 @@ from app.jobs.messages import IngestJobMessage
 from app.services.alignment import run_alignment_for_inspection
 from app.services.detection_pipeline import run_detection_for_inspection
 from app.services.progression import run_progression_for_inspection
+from app.services.recommendation_engine import run_recommendations_for_inspection
 from app.services.frame_extraction import extract_and_store_frames
 
 log = logging.getLogger(__name__)
 
 
-def process_payload(payload: str) -> tuple[int, int, int, int, int]:
-    """Run extraction + detection + alignment + progression for one job payload.
+def process_payload(payload: str) -> tuple[int, int, int, int, int, int]:
+    """Run extraction, detection, alignment, progression, and recommendations for one job payload.
 
-    Returns: (frame_count, detection_count, aligned_pair_count, change_event_count, progression_metric_count)
+    Returns: (frame_count, detection_count, aligned_pair_count, change_event_count, progression_metric_count, recommendation_count)
     """
     settings = get_settings()
     msg = IngestJobMessage.model_validate_json(payload)
@@ -50,7 +51,23 @@ def process_payload(payload: str) -> tuple[int, int, int, int, int]:
             db=db,
             inspection_id=msg.inspection_id,
         )
-    return count, detection_count, aligned_pair_count, change_event_count, progression_metric_count
+        try:
+            recommendation_count = run_recommendations_for_inspection(
+                settings=settings,
+                db=db,
+                inspection_id=msg.inspection_id,
+            )
+        except Exception as exc:
+            log.warning("Recommendation generation failed for %s: %s", msg.inspection_id, exc)
+            recommendation_count = 0
+    return (
+        count,
+        detection_count,
+        aligned_pair_count,
+        change_event_count,
+        progression_metric_count,
+        recommendation_count,
+    )
 
 
 def main() -> None:
@@ -73,14 +90,16 @@ def main() -> None:
         aligned_pair_count,
         change_event_count,
         progression_metric_count,
+        recommendation_count,
     ) = process_payload(body)
     log.info(
-        "Completed worker run: extracted %s frames, persisted %s detections, %s alignment pairs, %s change events, %s progression metrics",
+        "Completed worker run: extracted %s frames, persisted %s detections, %s alignment pairs, %s change events, %s progression metrics, %s recommendations",
         frame_count,
         detection_count,
         aligned_pair_count,
         change_event_count,
         progression_metric_count,
+        recommendation_count,
     )
 
 

@@ -58,6 +58,7 @@ class Inspection(Base):
     aligned_pair_count: Mapped[int | None] = mapped_column(nullable=True)
     change_event_count: Mapped[int | None] = mapped_column(nullable=True)
     progression_metric_count: Mapped[int | None] = mapped_column(nullable=True)
+    recommendation_count: Mapped[int | None] = mapped_column(nullable=True)
 
     status: Mapped[InspectionStatus] = mapped_column(
         Enum(InspectionStatus, name="inspection_status", native_enum=False, length=32),

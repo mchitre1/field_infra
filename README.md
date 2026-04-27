@@ -4,7 +4,7 @@ Backend services for converting visual inspection media (drone, mobile, fixed ca
 
 ## Implemented today
 
-The backend currently implements six connected slices under `backend/`:
+The backend currently implements seven connected slices under `backend/`:
 
 - **Ingestion (feature 0001):** multipart and presigned uploads persist inspections, store source media in S3, and publish ingest jobs to SQS when configured.
 - **Frame extraction (feature 0002):** a worker consumes ingest jobs, extracts frames from image/video media, stores frame JPEGs in S3, and persists frame-level metadata for downstream analysis.
@@ -12,6 +12,7 @@ The backend currently implements six connected slices under `backend/`:
 - **Temporal alignment and change tracking (feature 0004):** after detections, the worker aligns detections against a baseline inspection for the same cohort, stores alignment pairs/change events, and exposes alignment/change query APIs.
 - **Progression metrics (feature 0005):** after alignment, the worker derives quantitative metrics from persisted `persisted` alignment pairs (e.g. crack growth rate, vegetation encroachment delta), stores `progression_metrics` rows, and exposes list + summary read APIs.
 - **Temporal insights (feature 0006):** read-only APIs that assemble **change maps** (normalized bbox overlays, optional presigned frame URLs), **timelines** (change events + progression metrics per `asset_zone_id`), and **trend summaries** (cross-inspection progression aggregates)—no extra worker stage; data comes from existing tables.
+- **Maintenance recommendations (feature 0007):** after progression, the worker builds rule-based **prioritized recommendations** per `asset_zone_id` (score, label, rationale JSON, SLA target from inspection effective time + configured days), persists `maintenance_recommendations` rows, and exposes a paginated read API.
 
 API details, worker behavior, request examples, and configuration are in [docs/INGEST_API.md](docs/INGEST_API.md).
 

@@ -1,4 +1,4 @@
-# Ingestion through temporal insights API (features 0001-0006)
+# Ingestion through maintenance recommendations API (features 0001-0007)
 
 The ingestion layer accepts **images and video** with metadata, writes source objects to **Amazon S3**, records inspections in **PostgreSQL**, and sends a JSON job to **Amazon SQS** when `SQS_QUEUE_URL` is set.
 
@@ -11,6 +11,8 @@ Feature 0004 adds temporal alignment/change tracking: detection sets are aligned
 Feature 0005 adds progression metrics: for each `persisted` alignment pair with both detection IDs set, the worker may emit crack and vegetation metrics (size/area deltas and optional per-day rates), persist rows in `progression_metrics`, and update `progression_metric_count` on the target inspection. Inspection **status** remains `alignment_ready` when progression succeeds; failures set `metadata.progression_error` and `progression_metric_count` to `0`.
 
 Feature 0006 adds **read-only temporal insights** assembled from existing rows (no new pipeline stage): **change maps** (normalized bbox features for overlays), **anomaly timelines** (change events + progression metrics in one time-ordered list), and **trend summaries** (cross-inspection progression aggregates for an `asset_zone_id` + `metric_name`). Limits: `change_map_max_features`, `timeline_max_entries`, `trend_max_points` (see settings).
+
+Feature 0007 adds **maintenance recommendations**: after progression, the worker replaces all `maintenance_recommendations` rows for the target inspection with a ranked list per `asset_zone_id` (priority score, label, human-readable `action_summary`, structured `rationale` JSON, and `sla_target_at` from target effective time + configured SLA days). Failures set `metadata.recommendation_error` and `recommendation_count=0` without failing the whole ingest job.
 
 The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped from SQLAlchemy rows.
 
@@ -33,6 +35,7 @@ The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped fro
 | `GET` | `/ingest/compare/alignment` | Pairwise alignment rows between two inspections (baseline vs target) with filters + pagination |
 | `GET` | `/ingest/timeline` | Unified timeline: `change_event` + `progression_metric` rows for an `asset_zone_id` |
 | `GET` | `/ingest/trends` | Progression series + aggregates for one `asset_zone_id` and `metric_name` across inspections |
+| `GET` | `/ingest/{inspection_id}/recommendations` | Paginated maintenance recommendations (filters: `asset_zone_id`, `priority_label`) |
 
 Correlation: send `X-Request-ID` or `X-Correlation-ID`; the response echoes `X-Request-ID`. Logs include the correlation id.
 
@@ -130,7 +133,7 @@ Messages are the JSON serialization of `IngestJobMessage`:
   - `model_name` / `model_version`
   - `enabled_classes` (empty list means no class allowlist)
 
-## Worker flow (extraction + detection + alignment + progression)
+## Worker flow (extraction + detection + alignment + progression + recommendations)
 
 The worker entrypoint is `python -m app.workers.ingest_ack '<json payload>'`.
 
@@ -166,6 +169,7 @@ Current behavior:
     - elapsed time uses each inspection’s `capture_timestamp` when set, otherwise `created_at`
     - crack size proxy is controlled by `progression_crack_metric` (`bbox_width` \| `bbox_area` \| `max_extent`); vegetation v1 uses normalized bbox area only
 12. Set `progression_metric_count` to the number of metric rows written (may be `0` if no eligible pairs).
+13. When status is still `alignment_ready`, run **maintenance recommendations**: delete existing `maintenance_recommendations` for the target inspection, recompute rule-based rows (per `asset_zone_id`), set `recommendation_count`, and clear `metadata.recommendation_error` on success. On recommendation failure, set `metadata.recommendation_error` and `recommendation_count=0` without failing the worker job.
 
 On extraction failure, status is `frames_failed` and error is stored in `inspection.metadata.frame_extraction_error`.
 On detection failure, status is `detections_failed` and error is stored in `inspection.metadata.detection_error`.
@@ -285,6 +289,26 @@ curl -sS "http://127.0.0.1:8000/ingest/trends?asset_zone_id=substation-a%3Acrack
 
 `TimelineEntry.entry_kind` is either `change_event` or `progression_metric`; drill-down ids live under `refs` (e.g. `change_event_id`, `progression_metric_id`).
 
+## Maintenance recommendations (feature 0007)
+
+**Anchor time for SLA:** `sla_target_at` = `coalesce(inspection.capture_timestamp, inspection.created_at)` on the **target** inspection plus `sla_days_suggested` seconds (`sla_days_suggested * 86400`), where `sla_days_suggested` comes from the priority band (`critical` \| `high` \| `medium` \| `low`) via settings (`recommend_sla_days_*`).
+
+**Replace semantics:** Each successful worker run (after progression) **deletes** all prior `maintenance_recommendations` for that `target_inspection_id` and inserts a fresh ranked list (up to `recommend_max_per_inspection`). On generation failure, `metadata.recommendation_error` is set and `recommendation_count` is cleared to `0`.
+
+### `GET /ingest/{inspection_id}/recommendations`
+
+Returns paginated `items` ordered by `priority_rank`, then `asset_zone_id`. Filters: optional `asset_zone_id` (exact trim), `priority_label` (trimmed, compared to stored lowercase: `critical`, `high`, `medium`, `low`).
+
+Each row includes **`action_summary`** (short line for ops), **`rationale`** (JSON array of factors; each object has `kind`, `message`, and optional `refs` with ids for drill-down to detections, change events, or progression metrics), **`priority_score`** / **`priority_label`** / **`priority_rank`**, and **`sla_target_at`** / **`sla_days_suggested`**.
+
+**Worker gating:** recommendations are generated only when the target inspection **`status` is `alignment_ready`**. If not (e.g. alignment failed earlier), the step is skipped (`recommendation_count` unchanged by that call). The worker wraps recommendation generation in **try/except** so a thrown error does not fail the whole job (logs a warning, returns `0` for that stage).
+
+**Zone keys:** distinct `asset_zone_id` values are the union of zones from target-side **detections** (via `build_asset_zone_id` with the inspection), **change events**, and **alignment pairs**; progression metrics for the target are folded in when scoring.
+
+```bash
+curl -sS "http://127.0.0.1:8000/ingest/<inspection_id>/recommendations?priority_label=critical&limit=20&offset=0"
+```
+
 ## Configuration
 
 Environment variables are loaded via `pydantic-settings` (optional `.env` in the working directory). Common settings:
@@ -321,9 +345,18 @@ Environment variables are loaded via `pydantic-settings` (optional `.env` in the
 | `TREND_MAX_POINTS` | Cap on `/ingest/trends` series length (default `500`) |
 | `TREND_MIN_SPAN_DAYS` | Minimum day span before `simple_slope_per_day` is set (default `1.0`) |
 | `CHANGE_MAP_MAX_FEATURES` | Max alignment pairs processed per `/ingest/compare/change-map` (default `5000`) |
+| `RECOMMEND_DEFECT_CONFIDENCE_FLOOR` | Min max-defect confidence in a zone before defect-based scoring applies (default `0.5`) |
+| `RECOMMEND_WEIGHT_DEFECT_CONFIDENCE` | Weight × max defect/hazard confidence when above floor (default `40`) |
+| `RECOMMEND_WEIGHT_CHANGE_APPEARED` / `DISAPPEARED` / `OTHER` | Score bumps per change-event type (defaults `18` / `10` / `5`) |
+| `RECOMMEND_CRACK_GROWTH_RATE_FLOOR` | Threshold for `crack_growth_rate` progression contributions (default `0.0005`) |
+| `RECOMMEND_WEIGHT_CRACK_GROWTH` | Weight × capped excess rate above floor (default `35`) |
+| `RECOMMEND_VEGETATION_DELTA_FLOOR` / `RECOMMEND_WEIGHT_VEGETATION_DELTA` | Vegetation delta threshold and weight (defaults `0.005` / `22`) |
+| `RECOMMEND_BAND_CRITICAL_MIN` / `HIGH` / `MEDIUM` | Score cutoffs for labels (defaults `80` / `45` / `15`) |
+| `RECOMMEND_SLA_DAYS_CRITICAL` … `LOW` | SLA days per label (defaults `7` / `30` / `90` / `180`) |
+| `RECOMMEND_MAX_PER_INSPECTION` | Max recommendation rows per target inspection (default `100`) |
 
 Allowed MIME types default to `image/jpeg`, `image/png`, `video/mp4`, `video/quicktime`. Override via settings if the project extends the allowlist.
 
 ## Worker invocation note
 
-`app.workers.ingest_ack` is a payload-driven CLI entrypoint. With a JSON job body it runs extraction, detection, alignment, and progression in one session and can be wrapped by SQS consumer infrastructure.
+`app.workers.ingest_ack` is a payload-driven CLI entrypoint. With a JSON job body it runs extraction, detection, alignment, progression, and maintenance recommendations in one session and can be wrapped by SQS consumer infrastructure.
