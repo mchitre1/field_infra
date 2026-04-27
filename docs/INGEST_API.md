@@ -1,4 +1,4 @@
-# Ingestion, Extraction, Detection, and Alignment API (features 0001-0004)
+# Ingestion through progression API (features 0001-0005)
 
 The ingestion layer accepts **images and video** with metadata, writes source objects to **Amazon S3**, records inspections in **PostgreSQL**, and sends a JSON job to **Amazon SQS** when `SQS_QUEUE_URL` is set.
 
@@ -7,6 +7,8 @@ Feature 0002 extends this flow with worker-side frame extraction: frame JPEG art
 Feature 0003 adds frame-level detection/classification: detections are persisted with confidence, bounding boxes, optional geometry/attributes, and grouped as `asset`, `defect`, or `environmental_hazard`.
 
 Feature 0004 adds temporal alignment/change tracking: detection sets are aligned against a baseline inspection in the same cohort, aligned pairs are persisted, and change events are recorded for appeared/disappeared items.
+
+Feature 0005 adds progression metrics: for each `persisted` alignment pair with both detection IDs set, the worker may emit crack and vegetation metrics (size/area deltas and optional per-day rates), persist rows in `progression_metrics`, and update `progression_metric_count` on the target inspection. Inspection **status** remains `alignment_ready` when progression succeeds; failures set `metadata.progression_error` and `progression_metric_count` to `0`.
 
 The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped from SQLAlchemy rows.
 
@@ -23,6 +25,8 @@ The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped fro
 | `GET` | `/ingest/{inspection_id}/frames/{frame_id}/detections` | List detections for a single frame |
 | `GET` | `/ingest/{inspection_id}/alignment` | List alignment pairs for an inspection with filtering + pagination |
 | `GET` | `/ingest/{inspection_id}/changes` | List change events for an inspection with filtering + pagination |
+| `GET` | `/ingest/{inspection_id}/progression` | List progression metrics for a target inspection (filters + pagination) |
+| `GET` | `/ingest/{inspection_id}/progression/summary` | Aggregate min/max/latest per `metric_name` for that inspection |
 
 Correlation: send `X-Request-ID` or `X-Correlation-ID`; the response echoes `X-Request-ID`. Logs include the correlation id.
 
@@ -96,6 +100,8 @@ curl -sS -X POST "http://127.0.0.1:8000/ingest/<inspection_id>/complete" \
 | `alignment_failed` | Alignment stage failed; see `metadata.alignment_error` |
 | `failed` | Reserved enum value; not used by the current happy-path flows |
 
+There are **no** separate `processing_progression` / `progression_ready` statuses: progression runs in the worker after alignment; use `progression_metric_count` and `metadata.progression_error` for outcomes.
+
 If `SQS_QUEUE_URL` is empty, successful uploads remain **`stored`** after persist (no queue).
 
 ## SQS message body
@@ -118,7 +124,7 @@ Messages are the JSON serialization of `IngestJobMessage`:
   - `model_name` / `model_version`
   - `enabled_classes` (empty list means no class allowlist)
 
-## Worker flow (extraction + detection + alignment)
+## Worker flow (extraction + detection + alignment + progression)
 
 The worker entrypoint is `python -m app.workers.ingest_ack '<json payload>'`.
 
@@ -146,10 +152,19 @@ Current behavior:
    - match baseline vs target detections (type/class + IoU threshold + confidence gate)
    - persist `alignment_pairs` and derived `change_events`
 10. Update `aligned_pair_count`, `change_event_count`, and set status `alignment_ready`.
+11. Run progression for the same target inspection when status is `alignment_ready`:
+    - delete existing `progression_metrics` rows for that target, then recompute
+    - consider only alignment pairs with `change_type=persisted` and both `baseline_detection_id` and `target_detection_id` set
+    - **Crack:** both detections are `defect` with class `crack` — emits `crack_size_delta` (always) and `crack_growth_rate` (only if elapsed time between inspections ≥ `progression_min_time_delta_seconds`)
+    - **Vegetation:** both detections are `environmental_hazard` with class `vegetation_encroachment` — emits `vegetation_encroachment_delta` and optionally `vegetation_encroachment_rate` under the same time rule
+    - elapsed time uses each inspection’s `capture_timestamp` when set, otherwise `created_at`
+    - crack size proxy is controlled by `progression_crack_metric` (`bbox_width` \| `bbox_area` \| `max_extent`); vegetation v1 uses normalized bbox area only
+12. Set `progression_metric_count` to the number of metric rows written (may be `0` if no eligible pairs).
 
 On extraction failure, status is `frames_failed` and error is stored in `inspection.metadata.frame_extraction_error`.
 On detection failure, status is `detections_failed` and error is stored in `inspection.metadata.detection_error`.
 On alignment failure, status is `alignment_failed` and error is stored in `inspection.metadata.alignment_error`.
+If progression fails after alignment, `metadata.progression_error` is set and `progression_metric_count` is cleared to `0`; inspection status is **not** changed by progression (it stays `alignment_ready` unless alignment itself failed earlier).
 
 ## Frame listing endpoint
 
@@ -210,6 +225,23 @@ Example:
 curl -sS "http://127.0.0.1:8000/ingest/<inspection_id>/alignment?change_type=appeared&limit=50&offset=0"
 ```
 
+## Progression metrics endpoints
+
+`GET /ingest/{inspection_id}/progression` returns a paginated envelope (`items`, `total`, `limit`, `offset`). Rows are ordered by `asset_zone_id`, `metric_name`, `created_at`.
+
+Filters:
+
+- `metric_name` (exact match after trim)
+- `asset_zone_id`
+
+Example:
+
+```bash
+curl -sS "http://127.0.0.1:8000/ingest/<inspection_id>/progression?metric_name=crack_growth_rate&limit=50&offset=0"
+```
+
+`GET /ingest/{inspection_id}/progression/summary` returns `target_inspection_id` and `items[]` with per-`metric_name` aggregates: `min_value`, `max_value`, `latest_value` (last row in creation order), and `count`.
+
 ## Configuration
 
 Environment variables are loaded via `pydantic-settings` (optional `.env` in the working directory). Common settings:
@@ -238,9 +270,13 @@ Environment variables are loaded via `pydantic-settings` (optional `.env` in the
 | `ALIGNMENT_GEO_TOLERANCE_METERS` | Reserved geospatial tolerance setting for matching policies |
 | `ALIGNMENT_IOU_THRESHOLD` | Minimum IoU for baseline/target detection matching (default `0.3`) |
 | `ALIGNMENT_MIN_CONFIDENCE` | Confidence floor used by alignment matching (default `0.35`) |
+| `ALIGNMENT_MAX_CENTROID_NORM_DISTANCE` | Max normalized image-space centroid distance for a candidate match (default `0.55`) |
+| `PROGRESSION_MIN_TIME_DELTA_SECONDS` | Minimum seconds between baseline/target ref times before emitting `*_rate` metrics (default `3600`) |
+| `PROGRESSION_CRACK_METRIC` | Crack size proxy: `bbox_width` \| `bbox_area` \| `max_extent` (default `bbox_width`) |
+| `PROGRESSION_VEGETATION_METRIC` | Reserved; v1 always uses normalized bbox area for vegetation metrics |
 
 Allowed MIME types default to `image/jpeg`, `image/png`, `video/mp4`, `video/quicktime`. Override via settings if the project extends the allowlist.
 
 ## Worker invocation note
 
-`app.workers.ingest_ack` is currently a payload-driven CLI entrypoint. It executes extraction when called with a JSON message body and can be wrapped by SQS consumer infrastructure.
+`app.workers.ingest_ack` is a payload-driven CLI entrypoint. With a JSON job body it runs extraction, detection, alignment, and progression in one session and can be wrapped by SQS consumer infrastructure.

@@ -52,5 +52,6 @@ class InspectionPublic(BaseModel):
     detection_count: int | None = None
     aligned_pair_count: int | None = None
     change_event_count: int | None = None
+    progression_metric_count: int | None = None
 
     model_config = {"from_attributes": True}

@@ -14,6 +14,7 @@ from app.models.change_event import ChangeEvent
 from app.models.detection import Detection, DetectionType
 from app.models.frame import Frame
 from app.models.inspection import Inspection, SourceType
+from app.models.progression_metric import ProgressionMetric
 from app.schemas.alignment import (
     AlignmentCompareResponse,
     AlignmentPairPublic,
@@ -24,6 +25,12 @@ from app.schemas.alignment import (
 from app.schemas.detections import DetectionPublic, PaginatedDetectionsResponse
 from app.schemas.frames import FramePublic
 from app.schemas.ingest import CompleteIngestRequest, InspectionPublic, PresignRequest, PresignResponse
+from app.schemas.progression import (
+    PaginatedProgressionMetricsResponse,
+    ProgressionMetricPublic,
+    ProgressionMetricSummaryItem,
+    ProgressionSummaryResponse,
+)
 from app.services import ingest as ingest_service
 
 router = APIRouter(tags=["ingest"])
@@ -261,6 +268,80 @@ def list_alignment_pairs(
     ).all()
     return PaginatedAlignmentPairsResponse(
         items=[AlignmentPairPublic.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/ingest/{inspection_id}/progression/summary",
+    response_model=ProgressionSummaryResponse,
+)
+def summarize_progression_metrics(
+    inspection_id: UUID,
+    db: DbSession,
+) -> ProgressionSummaryResponse:
+    """Aggregate min/max/latest progression metric values per metric_name for an inspection."""
+    if db.get(Inspection, inspection_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inspection not found")
+    rows = db.scalars(
+        select(ProgressionMetric)
+        .where(ProgressionMetric.target_inspection_id == inspection_id)
+        .order_by(ProgressionMetric.created_at.asc(), ProgressionMetric.id.asc())
+    ).all()
+    by_name: dict[str, list[ProgressionMetric]] = {}
+    for r in rows:
+        by_name.setdefault(r.metric_name, []).append(r)
+    items: list[ProgressionMetricSummaryItem] = []
+    for name, group in sorted(by_name.items()):
+        vals = [float(x.value) for x in group]
+        latest = float(group[-1].value)
+        items.append(
+            ProgressionMetricSummaryItem(
+                metric_name=name,
+                min_value=min(vals),
+                max_value=max(vals),
+                latest_value=latest,
+                count=len(group),
+            )
+        )
+    return ProgressionSummaryResponse(target_inspection_id=inspection_id, items=items)
+
+
+@router.get(
+    "/ingest/{inspection_id}/progression",
+    response_model=PaginatedProgressionMetricsResponse,
+)
+def list_progression_metrics(
+    inspection_id: UUID,
+    db: DbSession,
+    metric_name: str | None = None,
+    asset_zone_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> PaginatedProgressionMetricsResponse:
+    """List progression metrics for a target inspection (filters: metric_name, asset_zone_id)."""
+    if db.get(Inspection, inspection_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inspection not found")
+    stmt = select(ProgressionMetric).where(ProgressionMetric.target_inspection_id == inspection_id)
+    if metric_name is not None:
+        stmt = stmt.where(ProgressionMetric.metric_name == metric_name.strip())
+    if asset_zone_id is not None:
+        stmt = stmt.where(ProgressionMetric.asset_zone_id == asset_zone_id)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.scalars(
+        stmt.order_by(
+            ProgressionMetric.asset_zone_id.asc(),
+            ProgressionMetric.metric_name.asc(),
+            ProgressionMetric.created_at.asc(),
+            ProgressionMetric.id.asc(),
+        )
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return PaginatedProgressionMetricsResponse(
+        items=[ProgressionMetricPublic.model_validate(r) for r in rows],
         total=total,
         limit=limit,
         offset=offset,

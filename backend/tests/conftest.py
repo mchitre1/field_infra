@@ -15,6 +15,7 @@ from app.models.change_event import ChangeEvent  # noqa: F401 - register metadat
 from app.models.detection import Detection  # noqa: F401 - register metadata
 from app.models.frame import Frame  # noqa: F401 - register metadata
 from app.models.inspection import Inspection  # noqa: F401 - register metadata
+from app.models.progression_metric import ProgressionMetric  # noqa: F401 - register metadata
 from app.db.session import reset_engine
 from app.main import app
 

@@ -3,5 +3,6 @@ from app.models.change_event import ChangeEvent
 from app.models.detection import Detection
 from app.models.frame import Frame
 from app.models.inspection import Inspection
+from app.models.progression_metric import ProgressionMetric
 
-__all__ = ["Inspection", "Frame", "Detection", "Alignment", "ChangeEvent"]
+__all__ = ["Inspection", "Frame", "Detection", "Alignment", "ChangeEvent", "ProgressionMetric"]

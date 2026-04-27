@@ -22,6 +22,10 @@ ENVIRONMENTAL_HAZARD_CLASSES = {
     "landslide",
 }
 
+CRACK_CLASSES = frozenset({"crack"})
+
+VEGETATION_ENCROACHMENT_CLASSES = frozenset({"vegetation_encroachment"})
+
 
 def map_class_to_detection_type(class_name: str) -> DetectionType | None:
     name = class_name.strip().lower()

@@ -52,6 +52,19 @@ class Settings(BaseSettings):
         description="Max normalized image-space distance between detection centroids for a match.",
     )
 
+    progression_min_time_delta_seconds: int = Field(
+        default=3600,
+        description="Minimum seconds between baseline and target ref time before emitting rate metrics.",
+    )
+    progression_crack_metric: str = Field(
+        default="bbox_width",
+        description="Size proxy for crack metrics: bbox_width | bbox_area | max_extent.",
+    )
+    progression_vegetation_metric: str = Field(
+        default="bbox_area",
+        description="Vegetation size proxy (v1 uses normalized bbox area only).",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

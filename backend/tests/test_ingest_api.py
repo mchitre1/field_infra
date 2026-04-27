@@ -14,6 +14,7 @@ from app.models.change_event import ChangeEvent
 from app.models.detection import Detection, DetectionType
 from app.models.frame import Frame
 from app.models.inspection import Inspection, InspectionStatus, SourceType
+from app.models.progression_metric import ProgressionMetric
 
 
 def test_health(client):
@@ -529,3 +530,125 @@ def test_list_change_events_endpoint(client, sqlite_session):
     payload = r.json()
     assert payload["total"] == 1
     assert payload["items"][0]["event_type"] == "appeared"
+
+
+def test_list_progression_metrics_endpoint(client, sqlite_session):
+    baseline = Inspection(
+        id=UUID("a1111111-1111-1111-1111-111111111111"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k1",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    target = Inspection(
+        id=UUID("b2222222-2222-2222-2222-222222222222"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k2",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    sqlite_session.add_all([baseline, target])
+    sqlite_session.commit()
+    sqlite_session.add(
+        ProgressionMetric(
+            id=UUID("d4444444-4444-4444-4444-444444444444"),
+            asset_zone_id="zone-1",
+            baseline_inspection_id=baseline.id,
+            target_inspection_id=target.id,
+            alignment_pair_id=None,
+            metric_name="crack_growth_rate",
+            metric_unit="normalized_units_per_day",
+            value=0.05,
+            payload={"delta_t_days": 1.0},
+        )
+    )
+    sqlite_session.commit()
+
+    r = client.get(f"/ingest/{target.id}/progression?metric_name=crack_growth_rate")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["metric_name"] == "crack_growth_rate"
+    assert payload["items"][0]["value"] == 0.05
+
+
+def test_summarize_progression_metrics_endpoint(client, sqlite_session):
+    baseline = Inspection(
+        id=UUID("e5555555-5555-5555-5555-555555555555"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k1",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    target = Inspection(
+        id=UUID("f6666666-6666-6666-6666-666666666666"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k2",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    sqlite_session.add_all([baseline, target])
+    sqlite_session.commit()
+    sqlite_session.add_all(
+        [
+            ProgressionMetric(
+                id=UUID("b1b1b1b1-b1b1-b1b1-b1b1-b1b1b1b1b1b1"),
+                asset_zone_id="z",
+                baseline_inspection_id=baseline.id,
+                target_inspection_id=target.id,
+                alignment_pair_id=None,
+                metric_name="vegetation_encroachment_delta",
+                metric_unit="area_delta",
+                value=0.01,
+                payload=None,
+            ),
+            ProgressionMetric(
+                id=UUID("c2c2c2c2-c2c2-c2c2-c2c2-c2c2c2c2c2c2"),
+                asset_zone_id="z",
+                baseline_inspection_id=baseline.id,
+                target_inspection_id=target.id,
+                alignment_pair_id=None,
+                metric_name="vegetation_encroachment_delta",
+                metric_unit="area_delta",
+                value=0.03,
+                payload=None,
+            ),
+        ]
+    )
+    sqlite_session.commit()
+
+    r = client.get(f"/ingest/{target.id}/progression/summary")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["target_inspection_id"] == str(target.id)
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["metric_name"] == "vegetation_encroachment_delta"
+    assert item["min_value"] == 0.01
+    assert item["max_value"] == 0.03
+    assert item["latest_value"] == 0.03
+    assert item["count"] == 2
