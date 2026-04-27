@@ -652,3 +652,73 @@ def test_summarize_progression_metrics_endpoint(client, sqlite_session):
     assert item["max_value"] == 0.03
     assert item["latest_value"] == 0.03
     assert item["count"] == 2
+
+
+def test_compare_change_map_404(client, sqlite_session):
+    missing = UUID("99999999-9999-9999-9999-999999999999")
+    r = client.get(
+        "/ingest/compare/change-map",
+        params={"baseline_inspection_id": str(missing), "target_inspection_id": str(missing)},
+    )
+    assert r.status_code == 404
+
+
+def test_timeline_requires_asset_zone_id(client):
+    r = client.get("/ingest/timeline")
+    assert r.status_code == 422
+
+
+def test_trends_endpoint(client, sqlite_session):
+    baseline = Inspection(
+        id=UUID("a0a0a0a0-a0a0-a0a0-a0a0-a0a0a0a0a0a0"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="s-trend",
+        asset_hint="a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k1",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    target = Inspection(
+        id=UUID("b0b0b0b0-b0b0-b0b0-b0b0-b0b0b0b0b0b0"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="s-trend",
+        asset_hint="a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k2",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    sqlite_session.add_all([baseline, target])
+    sqlite_session.commit()
+    sqlite_session.add(
+        ProgressionMetric(
+            id=UUID("c0c0c0c0-c0c0-c0c0-c0c0-c0c0c0c0c0c0"),
+            asset_zone_id="zone-trend-api",
+            baseline_inspection_id=baseline.id,
+            target_inspection_id=target.id,
+            alignment_pair_id=None,
+            metric_name="crack_growth_rate",
+            metric_unit="u",
+            value=0.02,
+            payload=None,
+        )
+    )
+    sqlite_session.commit()
+
+    r = client.get(
+        "/ingest/trends",
+        params={"asset_zone_id": "zone-trend-api", "metric_name": "crack_growth_rate"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["asset_zone_id"] == "zone-trend-api"
+    assert body["metric_name"] == "crack_growth_rate"
+    assert len(body["points"]) == 1
+    assert body["latest_value"] == 0.02

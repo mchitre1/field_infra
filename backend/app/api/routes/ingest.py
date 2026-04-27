@@ -31,7 +31,11 @@ from app.schemas.progression import (
     ProgressionMetricSummaryItem,
     ProgressionSummaryResponse,
 )
+from app.schemas.temporal_insights import ChangeMapResponse, TimelineEntry, TrendSummaryResponse
+from app.services import anomaly_timeline as anomaly_timeline_service
+from app.services import change_map as change_map_service
 from app.services import ingest as ingest_service
+from app.services import trend_summary as trend_summary_service
 
 router = APIRouter(tags=["ingest"])
 
@@ -374,6 +378,81 @@ def list_change_events(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get("/ingest/compare/change-map", response_model=ChangeMapResponse)
+def compare_change_map(
+    baseline_inspection_id: UUID,
+    target_inspection_id: UUID,
+    settings: SettingsDep,
+    db: DbSession,
+    s3_client: S3Client,
+    asset_zone_id: str | None = None,
+    frame_id: UUID | None = None,
+    include_frame_urls: bool = Query(default=False),
+):
+    """Normalized (0–1) bbox features per alignment side for baseline vs target overlay."""
+    try:
+        return change_map_service.build_change_map(
+            settings=settings,
+            db=db,
+            s3_client=s3_client,
+            baseline_inspection_id=baseline_inspection_id,
+            target_inspection_id=target_inspection_id,
+            asset_zone_id=asset_zone_id,
+            frame_id=frame_id,
+            include_frame_urls=include_frame_urls,
+        )
+    except LookupError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inspection not found") from None
+
+
+@router.get("/ingest/timeline", response_model=list[TimelineEntry])
+def list_timeline(
+    settings: SettingsDep,
+    db: DbSession,
+    asset_zone_id: str = Query(..., min_length=1),
+    org_id: UUID | None = None,
+    site_hint: str | None = None,
+    effective_from: datetime | None = None,
+    effective_to: datetime | None = None,
+    event_type: str | None = None,
+    metric_name: str | None = None,
+) -> list[TimelineEntry]:
+    """Unified change events and progression metrics ordered by effective inspection time."""
+    return anomaly_timeline_service.build_timeline(
+        settings=settings,
+        db=db,
+        asset_zone_id=asset_zone_id.strip(),
+        org_id=org_id,
+        site_hint=site_hint.strip() if site_hint else None,
+        effective_from=effective_from,
+        effective_to=effective_to,
+        event_type=event_type,
+        metric_name=metric_name,
+    )
+
+
+@router.get("/ingest/trends", response_model=TrendSummaryResponse)
+def get_trend_summary(
+    settings: SettingsDep,
+    db: DbSession,
+    asset_zone_id: str = Query(..., min_length=1),
+    metric_name: str = Query(..., min_length=1),
+    org_id: UUID | None = None,
+    effective_from: datetime | None = None,
+    effective_to: datetime | None = None,
+) -> TrendSummaryResponse:
+    """Progression metric series and aggregates for one asset zone across target inspections."""
+    return trend_summary_service.build_trend_summary(
+        settings=settings,
+        db=db,
+        asset_zone_id=asset_zone_id.strip(),
+        metric_name=metric_name.strip(),
+        org_id=org_id,
+        effective_from=effective_from,
+        effective_to=effective_to,
     )
 
 

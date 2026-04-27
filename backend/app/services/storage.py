@@ -140,3 +140,18 @@ def generate_presigned_put(
         headers["x-amz-server-side-encryption"] = "aws:kms"
         headers["x-amz-server-side-encryption-aws-kms-key-id"] = settings.kms_key_id
     return url, headers
+
+
+def generate_presigned_get(
+    *,
+    settings: Settings,
+    s3_client: Any,
+    bucket: str,
+    key: str,
+) -> str:
+    """Return a presigned GET URL for reading an object (e.g. frame JPEG)."""
+    return s3_client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=settings.presign_expires_seconds,
+    )

@@ -65,6 +65,27 @@ class Settings(BaseSettings):
         description="Vegetation size proxy (v1 uses normalized bbox area only).",
     )
 
+    timeline_max_entries: int = Field(
+        default=2000,
+        ge=1,
+        description="Max unified timeline rows returned (newest slice when exceeded).",
+    )
+    trend_max_points: int = Field(
+        default=500,
+        ge=1,
+        description="Max progression samples per trend response (most recent when exceeded).",
+    )
+    trend_min_span_days: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Minimum span in days (first→last effective time) before emitting simple_slope_per_day.",
+    )
+    change_map_max_features: int = Field(
+        default=5000,
+        ge=1,
+        description="Max alignment pairs processed per change-map request (oldest pairs dropped when exceeded).",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1,4 +1,4 @@
-# Ingestion through progression API (features 0001-0005)
+# Ingestion through temporal insights API (features 0001-0006)
 
 The ingestion layer accepts **images and video** with metadata, writes source objects to **Amazon S3**, records inspections in **PostgreSQL**, and sends a JSON job to **Amazon SQS** when `SQS_QUEUE_URL` is set.
 
@@ -9,6 +9,8 @@ Feature 0003 adds frame-level detection/classification: detections are persisted
 Feature 0004 adds temporal alignment/change tracking: detection sets are aligned against a baseline inspection in the same cohort, aligned pairs are persisted, and change events are recorded for appeared/disappeared items.
 
 Feature 0005 adds progression metrics: for each `persisted` alignment pair with both detection IDs set, the worker may emit crack and vegetation metrics (size/area deltas and optional per-day rates), persist rows in `progression_metrics`, and update `progression_metric_count` on the target inspection. Inspection **status** remains `alignment_ready` when progression succeeds; failures set `metadata.progression_error` and `progression_metric_count` to `0`.
+
+Feature 0006 adds **read-only temporal insights** assembled from existing rows (no new pipeline stage): **change maps** (normalized bbox features for overlays), **anomaly timelines** (change events + progression metrics in one time-ordered list), and **trend summaries** (cross-inspection progression aggregates for an `asset_zone_id` + `metric_name`). Limits: `change_map_max_features`, `timeline_max_entries`, `trend_max_points` (see settings).
 
 The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped from SQLAlchemy rows.
 
@@ -27,6 +29,10 @@ The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped fro
 | `GET` | `/ingest/{inspection_id}/changes` | List change events for an inspection with filtering + pagination |
 | `GET` | `/ingest/{inspection_id}/progression` | List progression metrics for a target inspection (filters + pagination) |
 | `GET` | `/ingest/{inspection_id}/progression/summary` | Aggregate min/max/latest per `metric_name` for that inspection |
+| `GET` | `/ingest/compare/change-map` | Normalized bbox features per alignment side for baseline vs target (optional frame presigns) |
+| `GET` | `/ingest/compare/alignment` | Pairwise alignment rows between two inspections (baseline vs target) with filters + pagination |
+| `GET` | `/ingest/timeline` | Unified timeline: `change_event` + `progression_metric` rows for an `asset_zone_id` |
+| `GET` | `/ingest/trends` | Progression series + aggregates for one `asset_zone_id` and `metric_name` across inspections |
 
 Correlation: send `X-Request-ID` or `X-Correlation-ID`; the response echoes `X-Request-ID`. Logs include the correlation id.
 
@@ -153,7 +159,7 @@ Current behavior:
    - persist `alignment_pairs` and derived `change_events`
 10. Update `aligned_pair_count`, `change_event_count`, and set status `alignment_ready`.
 11. Run progression for the same target inspection when status is `alignment_ready`:
-    - delete existing `progression_metrics` rows for that target, then recompute
+    - if status is not `alignment_ready`, progression skips without deleting existing metrics; otherwise delete existing `progression_metrics` rows for that target, then recompute
     - consider only alignment pairs with `change_type=persisted` and both `baseline_detection_id` and `target_detection_id` set
     - **Crack:** both detections are `defect` with class `crack` — emits `crack_size_delta` (always) and `crack_growth_rate` (only if elapsed time between inspections ≥ `progression_min_time_delta_seconds`)
     - **Vegetation:** both detections are `environmental_hazard` with class `vegetation_encroachment` — emits `vegetation_encroachment_delta` and optionally `vegetation_encroachment_rate` under the same time rule
@@ -242,6 +248,43 @@ curl -sS "http://127.0.0.1:8000/ingest/<inspection_id>/progression?metric_name=c
 
 `GET /ingest/{inspection_id}/progression/summary` returns `target_inspection_id` and `items[]` with per-`metric_name` aggregates: `min_value`, `max_value`, `latest_value` (last row in creation order), and `count`.
 
+## Temporal insights (feature 0006)
+
+**Coordinate system (change map):** Each feature’s `geometry` uses **normalized image coordinates** (`xmin`, `ymin`, `xmax`, `ymax` in 0–1), matching persisted detection bboxes. Optional `frame_image_url` is a presigned **GET** for the underlying frame JPEG when `include_frame_urls=true`.
+
+**Effective time (timeline + trends):** `effective_at` for timeline entries and trend `points` uses `coalesce(inspection.capture_timestamp, inspection.created_at)` on the **target** inspection row (`ChangeEvent.inspection_id` or `ProgressionMetric.target_inspection_id`).
+
+### `GET /ingest/compare/change-map`
+
+Query: `baseline_inspection_id`, `target_inspection_id` (required UUIDs); optional `asset_zone_id`, `frame_id` (restrict to one frame’s detections on each side), `include_frame_urls` (default `false`). Returns `features[]` (one entry per visible detection side: `baseline` and/or `target`), `truncated` if more than `change_map_max_features` alignment pairs matched (newest pairs kept).
+
+### `GET /ingest/timeline`
+
+Query: **`asset_zone_id`** (required); optional `org_id`, `site_hint` (exact match on `Inspection.site_hint`), `effective_from`, `effective_to` (filter on effective time), `event_type`, `metric_name`. Returns a JSON array of `TimelineEntry` objects sorted ascending by `effective_at`, then inspection and id tie-breakers. If the merged stream exceeds `timeline_max_entries`, the **oldest** entries are dropped so the response keeps the newest slice.
+
+### `GET /ingest/trends`
+
+Query: **`asset_zone_id`**, **`metric_name`** (required); optional `org_id`, `effective_from`, `effective_to`. Returns `points[]` in ascending `effective_at` order (at most `trend_max_points`, **most recent** samples when the series is longer). Aggregates `min_value`, `max_value`, `mean_value`, `latest_value`, `delta_first_to_latest`, and `simple_slope_per_day` are computed from the **full** filtered series (all matching rows), not only the returned `points` slice; `truncated` is true when `points` omits older samples.
+
+### `GET /ingest/compare/alignment`
+
+Query: `baseline_inspection_id`, `target_inspection_id` (required); optional `asset_zone_id`, `change_type`, `detection_type`, `class_name` (filters via joined detections where applicable), `limit`, `offset`. Returns `items` (alignment pair rows), `total`, and pagination echo—same row shape as single-inspection alignment list, scoped to one baseline/target pair.
+
+**Examples**
+
+```bash
+# Change map (optional presigned frame JPEG URLs for overlay clients)
+curl -sS "http://127.0.0.1:8000/ingest/compare/change-map?baseline_inspection_id=<uuid>&target_inspection_id=<uuid>&include_frame_urls=true"
+
+# Timeline (asset_zone_id required)
+curl -sS "http://127.0.0.1:8000/ingest/timeline?asset_zone_id=substation-a%3Acrack%3A4%3A5&org_id=<uuid>&effective_from=2026-01-01T00:00:00Z"
+
+# Trends
+curl -sS "http://127.0.0.1:8000/ingest/trends?asset_zone_id=substation-a%3Acrack%3A4%3A5&metric_name=crack_growth_rate"
+```
+
+`TimelineEntry.entry_kind` is either `change_event` or `progression_metric`; drill-down ids live under `refs` (e.g. `change_event_id`, `progression_metric_id`).
+
 ## Configuration
 
 Environment variables are loaded via `pydantic-settings` (optional `.env` in the working directory). Common settings:
@@ -274,6 +317,10 @@ Environment variables are loaded via `pydantic-settings` (optional `.env` in the
 | `PROGRESSION_MIN_TIME_DELTA_SECONDS` | Minimum seconds between baseline/target ref times before emitting `*_rate` metrics (default `3600`) |
 | `PROGRESSION_CRACK_METRIC` | Crack size proxy: `bbox_width` \| `bbox_area` \| `max_extent` (default `bbox_width`) |
 | `PROGRESSION_VEGETATION_METRIC` | Reserved; v1 always uses normalized bbox area for vegetation metrics |
+| `TIMELINE_MAX_ENTRIES` | Cap on unified `/ingest/timeline` rows returned (default `2000`) |
+| `TREND_MAX_POINTS` | Cap on `/ingest/trends` series length (default `500`) |
+| `TREND_MIN_SPAN_DAYS` | Minimum day span before `simple_slope_per_day` is set (default `1.0`) |
+| `CHANGE_MAP_MAX_FEATURES` | Max alignment pairs processed per `/ingest/compare/change-map` (default `5000`) |
 
 Allowed MIME types default to `image/jpeg`, `image/png`, `video/mp4`, `video/quicktime`. Override via settings if the project extends the allowlist.
 
