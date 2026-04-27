@@ -35,6 +35,19 @@ def publish_ingest_job(
         capture_timestamp=inspection.capture_timestamp,
         site_hint=inspection.site_hint,
         asset_hint=inspection.asset_hint,
+        frame_extraction={
+            "mode": "default",
+            "fps": settings.frame_extraction_fps,
+            "max_frames": settings.max_frames_per_inspection,
+            "frames_bucket": settings.frames_bucket or settings.s3_bucket,
+        },
+        detection={
+            "mode": "default",
+            "threshold": settings.inference_confidence_threshold,
+            "model_name": settings.inference_model_name,
+            "model_version": settings.inference_model_version,
+            "enabled_classes": [],
+        },
     )
     try:
         sqs_client.send_message(

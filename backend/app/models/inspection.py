@@ -21,6 +21,12 @@ class InspectionStatus(str, enum.Enum):
     queued = "queued"
     failed = "failed"
     stored_pending_queue = "stored_pending_queue"
+    processing_frames = "processing_frames"
+    frames_extracted = "frames_extracted"
+    frames_failed = "frames_failed"
+    processing_detections = "processing_detections"
+    detections_ready = "detections_ready"
+    detections_failed = "detections_failed"
 
 
 class Inspection(Base):
@@ -41,6 +47,11 @@ class Inspection(Base):
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     byte_size: Mapped[int | None] = mapped_column(nullable=True)
+    frame_count: Mapped[int | None] = mapped_column(nullable=True)
+    video_duration_ms: Mapped[int | None] = mapped_column(nullable=True)
+    video_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    video_codec: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    detection_count: Mapped[int | None] = mapped_column(nullable=True)
 
     status: Mapped[InspectionStatus] = mapped_column(
         Enum(InspectionStatus, name="inspection_status", native_enum=False, length=32),

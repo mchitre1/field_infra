@@ -46,5 +46,9 @@ class InspectionPublic(BaseModel):
     s3_key: str
     content_type: str
     byte_size: int | None
+    frame_count: int | None = None
+    video_duration_ms: int | None = None
+    video_fps: float | None = None
+    detection_count: int | None = None
 
     model_config = {"from_attributes": True}

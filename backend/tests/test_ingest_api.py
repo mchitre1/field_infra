@@ -1,5 +1,6 @@
 import json
 from unittest.mock import MagicMock
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -8,7 +9,9 @@ from app.api.deps import get_db, get_s3_client, get_sqs_client
 from app.core.config import get_settings
 from app.db.session import reset_engine
 from app.main import app
-from app.models.inspection import Inspection
+from app.models.detection import Detection, DetectionType
+from app.models.frame import Frame
+from app.models.inspection import Inspection, InspectionStatus, SourceType
 
 
 def test_health(client):
@@ -246,3 +249,197 @@ def test_presign_and_complete_flow(sqlite_session, boto_mocks, monkeypatch):
         app.dependency_overrides.clear()
         get_settings.cache_clear()
         reset_engine()
+
+
+def test_list_frames_endpoint(client, sqlite_session):
+    insp = Inspection(
+        id=UUID("4aeb06f3-01ac-45ef-b9f9-c4f3a27287ff"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.frames_extracted,
+    )
+    sqlite_session.add(insp)
+    sqlite_session.commit()
+    sqlite_session.add(
+        Frame(
+            id=UUID("fd73604d-a15c-4cb4-a9ac-b22447ebf61a"),
+            inspection_id=insp.id,
+            frame_index=0,
+            frame_timestamp_ms=0,
+            s3_bucket="b",
+            s3_key="frames/000000.jpg",
+            source_type=SourceType.drone,
+            site_hint="site-a",
+            asset_hint="asset-a",
+        )
+    )
+    sqlite_session.commit()
+
+    r = client.get(f"/ingest/{insp.id}/frames")
+    assert r.status_code == 200
+    payload = r.json()
+    assert len(payload) == 1
+    assert payload[0]["frame_index"] == 0
+
+
+def test_list_frames_rejects_invalid_pagination(client, sqlite_session):
+    insp = Inspection(
+        id=UUID("5cd35e8e-6ac7-47ca-8167-58dc8dcdd6f1"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.frames_extracted,
+    )
+    sqlite_session.add(insp)
+    sqlite_session.commit()
+
+    r = client.get(f"/ingest/{insp.id}/frames?limit=0")
+    assert r.status_code == 422
+
+    r2 = client.get(f"/ingest/{insp.id}/frames?offset=-1")
+    assert r2.status_code == 422
+
+
+def test_list_detections_filtering(client, sqlite_session):
+    insp = Inspection(
+        id=UUID("9cf72ed3-5e6c-4d7b-b483-6b2854ad5e6e"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint=None,
+        asset_hint=None,
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.detections_ready,
+        detection_count=2,
+    )
+    sqlite_session.add(insp)
+    sqlite_session.commit()
+    frame = Frame(
+        id=UUID("f1ca0f57-1ec7-48b6-9d93-e9e94a833ca1"),
+        inspection_id=insp.id,
+        frame_index=0,
+        frame_timestamp_ms=0,
+        s3_bucket="b",
+        s3_key="frames/000000.jpg",
+        source_type=SourceType.drone,
+    )
+    sqlite_session.add(frame)
+    sqlite_session.commit()
+    sqlite_session.add_all(
+        [
+            Detection(
+                id=UUID("53aa9ba5-d413-4385-8897-7dd7e73e65a9"),
+                inspection_id=insp.id,
+                frame_id=frame.id,
+                detection_type=DetectionType.asset,
+                class_name="tower",
+                confidence=0.9,
+                bbox_xmin=0.1,
+                bbox_ymin=0.1,
+                bbox_xmax=0.8,
+                bbox_ymax=0.8,
+                geometry={"kind": "bbox"},
+                model_name="yolo",
+                model_version="v1",
+                extra_attributes={"severity": "low"},
+            ),
+            Detection(
+                id=UUID("d08f0453-9df6-4512-a8bc-aa0be8938c0b"),
+                inspection_id=insp.id,
+                frame_id=frame.id,
+                detection_type=DetectionType.defect,
+                class_name="crack",
+                confidence=0.4,
+                bbox_xmin=0.2,
+                bbox_ymin=0.2,
+                bbox_xmax=0.7,
+                bbox_ymax=0.7,
+                geometry={"kind": "bbox"},
+                model_name="yolo",
+                model_version="v1",
+            ),
+        ]
+    )
+    sqlite_session.commit()
+
+    r = client.get(
+        f"/ingest/{insp.id}/detections?detection_type=asset&min_confidence=0.5&class_name=TOWER"
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["total"] == 1
+    assert payload["limit"] == 100
+    assert payload["offset"] == 0
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["class_name"] == "tower"
+    assert payload["items"][0]["geometry"] == {"kind": "bbox"}
+    assert payload["items"][0]["attributes"] == {"severity": "low"}
+
+
+def test_list_frame_detections_endpoint(client, sqlite_session):
+    insp = Inspection(
+        id=UUID("55e2d9d1-c85b-4360-a711-f7d2f26aeeea"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint=None,
+        asset_hint=None,
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.detections_ready,
+    )
+    sqlite_session.add(insp)
+    sqlite_session.commit()
+    frame = Frame(
+        id=UUID("b67c7df9-4742-4e8f-8ea4-6df8fd0ef00b"),
+        inspection_id=insp.id,
+        frame_index=0,
+        frame_timestamp_ms=0,
+        s3_bucket="b",
+        s3_key="frames/000000.jpg",
+        source_type=SourceType.drone,
+    )
+    sqlite_session.add(frame)
+    sqlite_session.commit()
+    sqlite_session.add(
+        Detection(
+            id=UUID("ec22d102-600b-4bca-b82b-f845dbf75f80"),
+            inspection_id=insp.id,
+            frame_id=frame.id,
+            detection_type=DetectionType.environmental_hazard,
+            class_name="vegetation_encroachment",
+            confidence=0.76,
+            bbox_xmin=0.1,
+            bbox_ymin=0.1,
+            bbox_xmax=0.6,
+            bbox_ymax=0.6,
+            model_name="yolo",
+            model_version="v1",
+        )
+    )
+    sqlite_session.commit()
+
+    r = client.get(f"/ingest/{insp.id}/frames/{frame.id}/detections")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["total"] == 1
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["detection_type"] == "environmental_hazard"

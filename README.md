@@ -4,9 +4,13 @@ Backend services for converting visual inspection media (drone, mobile, fixed ca
 
 ## Implemented today
 
-The **ingestion vertical slice** is implemented under `backend/`: multipart uploads and presigned S3 uploads persist inspection metadata in PostgreSQL, store bytes in S3, and enqueue processing jobs on Amazon SQS when configured.
+The backend currently implements three connected slices under `backend/`:
 
-API details, request examples, and configuration are in [docs/INGEST_API.md](docs/INGEST_API.md).
+- **Ingestion (feature 0001):** multipart and presigned uploads persist inspections, store source media in S3, and publish ingest jobs to SQS when configured.
+- **Frame extraction (feature 0002):** a worker consumes ingest jobs, extracts frames from image/video media, stores frame JPEGs in S3, and persists frame-level metadata for downstream analysis.
+- **Detection and classification (feature 0003):** the worker runs frame-level inference, classifies outputs into asset/defect/environmental hazard groups, persists detections (confidence + geometry), and exposes query APIs for inspection/frame detections.
+
+API details, worker behavior, request examples, and configuration are in [docs/INGEST_API.md](docs/INGEST_API.md).
 
 ## Backend quick start
 
