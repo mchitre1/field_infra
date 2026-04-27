@@ -8,16 +8,17 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.jobs.messages import IngestJobMessage
+from app.services.alignment import run_alignment_for_inspection
 from app.services.detection_pipeline import run_detection_for_inspection
 from app.services.frame_extraction import extract_and_store_frames
 
 log = logging.getLogger(__name__)
 
 
-def process_payload(payload: str) -> tuple[int, int]:
-    """Run extraction + detection for one job payload.
+def process_payload(payload: str) -> tuple[int, int, int, int]:
+    """Run extraction + detection + alignment for one job payload.
 
-    Returns: (frame_count, detection_count)
+    Returns: (frame_count, detection_count, aligned_pair_count, change_event_count)
     """
     settings = get_settings()
     msg = IngestJobMessage.model_validate_json(payload)
@@ -38,7 +39,12 @@ def process_payload(payload: str) -> tuple[int, int]:
             inspection_id=msg.inspection_id,
             detection_hints=msg.detection,
         )
-    return count, detection_count
+        aligned_pair_count, change_event_count = run_alignment_for_inspection(
+            settings=settings,
+            db=db,
+            inspection_id=msg.inspection_id,
+        )
+    return count, detection_count, aligned_pair_count, change_event_count
 
 
 def main() -> None:
@@ -55,11 +61,15 @@ def main() -> None:
         body = payload
     else:
         body = json.dumps(json.loads(payload))
-    frame_count, detection_count = process_payload(body)
+    frame_count, detection_count, aligned_pair_count, change_event_count = process_payload(
+        body
+    )
     log.info(
-        "Completed worker run: extracted %s frames, persisted %s detections",
+        "Completed worker run: extracted %s frames, persisted %s detections, %s alignment pairs, %s change events",
         frame_count,
         detection_count,
+        aligned_pair_count,
+        change_event_count,
     )
 
 

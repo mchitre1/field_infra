@@ -27,6 +27,9 @@ class InspectionStatus(str, enum.Enum):
     processing_detections = "processing_detections"
     detections_ready = "detections_ready"
     detections_failed = "detections_failed"
+    processing_alignment = "processing_alignment"
+    alignment_ready = "alignment_ready"
+    alignment_failed = "alignment_failed"
 
 
 class Inspection(Base):
@@ -52,6 +55,8 @@ class Inspection(Base):
     video_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
     video_codec: Mapped[str | None] = mapped_column(String(255), nullable=True)
     detection_count: Mapped[int | None] = mapped_column(nullable=True)
+    aligned_pair_count: Mapped[int | None] = mapped_column(nullable=True)
+    change_event_count: Mapped[int | None] = mapped_column(nullable=True)
 
     status: Mapped[InspectionStatus] = mapped_column(
         Enum(InspectionStatus, name="inspection_status", native_enum=False, length=32),

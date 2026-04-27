@@ -9,6 +9,8 @@ from app.api.deps import get_db, get_s3_client, get_sqs_client
 from app.core.config import get_settings
 from app.db.session import reset_engine
 from app.main import app
+from app.models.alignment import Alignment
+from app.models.change_event import ChangeEvent
 from app.models.detection import Detection, DetectionType
 from app.models.frame import Frame
 from app.models.inspection import Inspection, InspectionStatus, SourceType
@@ -443,3 +445,87 @@ def test_list_frame_detections_endpoint(client, sqlite_session):
     assert payload["total"] == 1
     assert len(payload["items"]) == 1
     assert payload["items"][0]["detection_type"] == "environmental_hazard"
+
+
+def test_list_alignment_pairs_endpoint(client, sqlite_session):
+    target = Inspection(
+        id=UUID("22899042-6440-4e0c-8c54-d0a1cc8fe22a"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    baseline = Inspection(
+        id=UUID("08cdadb8-ad8f-4c8f-b7cf-f917c72cc984"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k2",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    sqlite_session.add_all([target, baseline])
+    sqlite_session.commit()
+    sqlite_session.add(
+        Alignment(
+            id=UUID("d9157d9f-2d52-4883-9939-f6f8599b7dc5"),
+            asset_zone_id="site-a:crack:3:3",
+            baseline_inspection_id=baseline.id,
+            target_inspection_id=target.id,
+            baseline_detection_id=None,
+            target_detection_id=None,
+            alignment_score=0.8,
+            change_type="persisted",
+        )
+    )
+    sqlite_session.commit()
+
+    r = client.get(f"/ingest/{target.id}/alignment")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["change_type"] == "persisted"
+
+
+def test_list_change_events_endpoint(client, sqlite_session):
+    target = Inspection(
+        id=UUID("7e3762af-dbfb-46e6-b1b0-797ed0641414"),
+        org_id=None,
+        source_type=SourceType.drone,
+        site_hint="site-a",
+        asset_hint="asset-a",
+        capture_timestamp=None,
+        s3_bucket="b",
+        s3_key="k",
+        content_type="image/jpeg",
+        byte_size=10,
+        status=InspectionStatus.alignment_ready,
+    )
+    sqlite_session.add(target)
+    sqlite_session.commit()
+    sqlite_session.add(
+        ChangeEvent(
+            id=UUID("1b664648-4607-464b-b2a2-835127fd4238"),
+            asset_zone_id="site-a:crack:3:3",
+            inspection_id=target.id,
+            event_type="appeared",
+            event_payload={"class_name": "crack"},
+        )
+    )
+    sqlite_session.commit()
+
+    r = client.get(f"/ingest/{target.id}/changes?event_type=appeared")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["event_type"] == "appeared"

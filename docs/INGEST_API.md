@@ -1,10 +1,12 @@
-# Ingestion, Frame Extraction, and Detection API (features 0001-0003)
+# Ingestion, Extraction, Detection, and Alignment API (features 0001-0004)
 
 The ingestion layer accepts **images and video** with metadata, writes source objects to **Amazon S3**, records inspections in **PostgreSQL**, and sends a JSON job to **Amazon SQS** when `SQS_QUEUE_URL` is set.
 
 Feature 0002 extends this flow with worker-side frame extraction: frame JPEG artifacts are stored in S3 and frame-level metadata is persisted in PostgreSQL.
 
 Feature 0003 adds frame-level detection/classification: detections are persisted with confidence, bounding boxes, optional geometry/attributes, and grouped as `asset`, `defect`, or `environmental_hazard`.
+
+Feature 0004 adds temporal alignment/change tracking: detection sets are aligned against a baseline inspection in the same cohort, aligned pairs are persisted, and change events are recorded for appeared/disappeared items.
 
 The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped from SQLAlchemy rows.
 
@@ -19,6 +21,8 @@ The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped fro
 | `GET` | `/ingest/{inspection_id}/frames` | List extracted frame metadata rows for an inspection |
 | `GET` | `/ingest/{inspection_id}/detections` | List detections for an inspection with filtering + pagination |
 | `GET` | `/ingest/{inspection_id}/frames/{frame_id}/detections` | List detections for a single frame |
+| `GET` | `/ingest/{inspection_id}/alignment` | List alignment pairs for an inspection with filtering + pagination |
+| `GET` | `/ingest/{inspection_id}/changes` | List change events for an inspection with filtering + pagination |
 
 Correlation: send `X-Request-ID` or `X-Correlation-ID`; the response echoes `X-Request-ID`. Logs include the correlation id.
 
@@ -87,6 +91,9 @@ curl -sS -X POST "http://127.0.0.1:8000/ingest/<inspection_id>/complete" \
 | `processing_detections` | Worker started detection/classification pass |
 | `detections_ready` | Detection persistence completed for the inspection |
 | `detections_failed` | Detection pass failed; see `metadata.detection_error` |
+| `processing_alignment` | Worker started temporal alignment for this inspection |
+| `alignment_ready` | Alignment pairs and change events persisted (or no baseline available) |
+| `alignment_failed` | Alignment stage failed; see `metadata.alignment_error` |
 | `failed` | Reserved enum value; not used by the current happy-path flows |
 
 If `SQS_QUEUE_URL` is empty, successful uploads remain **`stored`** after persist (no queue).
@@ -111,7 +118,7 @@ Messages are the JSON serialization of `IngestJobMessage`:
   - `model_name` / `model_version`
   - `enabled_classes` (empty list means no class allowlist)
 
-## Worker flow (frame extraction + detection)
+## Worker flow (extraction + detection + alignment)
 
 The worker entrypoint is `python -m app.workers.ingest_ack '<json payload>'`.
 
@@ -133,9 +140,16 @@ Current behavior:
    - apply threshold and optional `enabled_classes` filtering
    - persist detections with bbox, geometry, and model metadata
 8. Update `detection_count` and set status `detections_ready`.
+9. Run temporal alignment for the target inspection:
+   - select a baseline inspection in same org/site/asset cohort
+   - group detections by derived `asset_zone_id`
+   - match baseline vs target detections (type/class + IoU threshold + confidence gate)
+   - persist `alignment_pairs` and derived `change_events`
+10. Update `aligned_pair_count`, `change_event_count`, and set status `alignment_ready`.
 
 On extraction failure, status is `frames_failed` and error is stored in `inspection.metadata.frame_extraction_error`.
 On detection failure, status is `detections_failed` and error is stored in `inspection.metadata.detection_error`.
+On alignment failure, status is `alignment_failed` and error is stored in `inspection.metadata.alignment_error`.
 
 ## Frame listing endpoint
 
@@ -175,6 +189,27 @@ curl -sS "http://127.0.0.1:8000/ingest/<inspection_id>/detections?detection_type
 
 `GET /ingest/{inspection_id}/frames/{frame_id}/detections` returns the same paginated envelope scoped to one frame.
 
+## Alignment and change endpoints
+
+`GET /ingest/{inspection_id}/alignment` returns a paginated alignment-pair envelope:
+
+- `items`: alignment rows
+- `total`: matching row count
+- `limit`, `offset`: pagination echo
+
+Supported filters:
+
+- `asset_zone_id`
+- `change_type` (e.g. `persisted`, `appeared`, `disappeared`)
+
+`GET /ingest/{inspection_id}/changes` returns paginated change events for the inspection with optional `event_type` filtering.
+
+Example:
+
+```bash
+curl -sS "http://127.0.0.1:8000/ingest/<inspection_id>/alignment?change_type=appeared&limit=50&offset=0"
+```
+
 ## Configuration
 
 Environment variables are loaded via `pydantic-settings` (optional `.env` in the working directory). Common settings:
@@ -199,6 +234,10 @@ Environment variables are loaded via `pydantic-settings` (optional `.env` in the
 | `INFERENCE_DEVICE` | Inference runtime hint stored in detection attributes (default `cpu`) |
 | `INFERENCE_BATCH_SIZE` | Reserved inference batching setting for runtime implementations |
 | `SAM_MODEL_NAME` | Optional segmentation model hint for future geometry refinement |
+| `ALIGNMENT_TIME_TOLERANCE_SECONDS` | Baseline-selection time tolerance window (default `86400`) |
+| `ALIGNMENT_GEO_TOLERANCE_METERS` | Reserved geospatial tolerance setting for matching policies |
+| `ALIGNMENT_IOU_THRESHOLD` | Minimum IoU for baseline/target detection matching (default `0.3`) |
+| `ALIGNMENT_MIN_CONFIDENCE` | Confidence floor used by alignment matching (default `0.35`) |
 
 Allowed MIME types default to `image/jpeg`, `image/png`, `video/mp4`, `video/quicktime`. Override via settings if the project extends the allowlist.
 

@@ -50,5 +50,7 @@ class InspectionPublic(BaseModel):
     video_duration_ms: int | None = None
     video_fps: float | None = None
     detection_count: int | None = None
+    aligned_pair_count: int | None = None
+    change_event_count: int | None = None
 
     model_config = {"from_attributes": True}

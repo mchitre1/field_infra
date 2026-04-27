@@ -55,11 +55,11 @@ IIE is designed as a modular, cloud-native pipeline where each layer can scale i
 
 ## Repository note
 
-The `backend/` package currently implements the **ingestion + frame extraction + detection** slices:
+The `backend/` package currently implements the **ingestion + frame extraction + detection + temporal alignment** slices:
 
 - FastAPI upload and presigned-S3 ingestion flows
-- PostgreSQL inspection records, frame metadata, and detection rows
+- PostgreSQL inspection, frame, detection, alignment-pair, and change-event records
 - S3 storage for source media and extracted frame JPEGs
-- Optional SQS job publish for asynchronous extraction/detection worker processing
+- Optional SQS job publish for asynchronous worker processing (extraction -> detection -> alignment)
 
 See [INGEST_API.md](INGEST_API.md) for the live API and worker contract.

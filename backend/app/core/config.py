@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     inference_device: str = Field(default="cpu")
     inference_batch_size: int = Field(default=16)
     sam_model_name: str | None = Field(default=None)
+    alignment_time_tolerance_seconds: int = Field(default=86400)
+    alignment_geo_tolerance_meters: float = Field(default=250.0)
+    alignment_iou_threshold: float = Field(default=0.3)
+    alignment_min_confidence: float = Field(default=0.35)
+    alignment_max_centroid_norm_distance: float = Field(
+        default=0.55,
+        description="Max normalized image-space distance between detection centroids for a match.",
+    )
 
 
 @lru_cache

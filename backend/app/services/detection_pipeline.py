@@ -14,6 +14,14 @@ from app.services import storage
 from app.services.detection_inference import run_frame_detection
 
 
+def _build_detection_asset_zone_hint(inspection: Inspection, class_name: str) -> str:
+    site = (inspection.site_hint or "site-unknown").strip() or "site-unknown"
+    cls = class_name.lower()
+    if inspection.asset_hint and str(inspection.asset_hint).strip():
+        return f"{site}:{str(inspection.asset_hint).strip()}:{cls}"
+    return f"{site}:{cls}"
+
+
 def run_detection_for_inspection(
     *,
     settings: Settings,
@@ -77,6 +85,9 @@ def run_detection_for_inspection(
                         detection_type=det.detection_type,
                         class_name=det.class_name,
                         confidence=det.confidence,
+                        centroid_x=(det.bbox_xmin + det.bbox_xmax) / 2.0,
+                        centroid_y=(det.bbox_ymin + det.bbox_ymax) / 2.0,
+                        asset_zone_hint=_build_detection_asset_zone_hint(inspection, det.class_name),
                         bbox_xmin=det.bbox_xmin,
                         bbox_ymin=det.bbox_ymin,
                         bbox_xmax=det.bbox_xmax,

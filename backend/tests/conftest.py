@@ -10,6 +10,8 @@ from sqlalchemy.pool import StaticPool
 from app.api.deps import get_db, get_s3_client, get_sqs_client
 from app.core.config import get_settings
 from app.db.base import Base
+from app.models.alignment import Alignment  # noqa: F401 - register metadata
+from app.models.change_event import ChangeEvent  # noqa: F401 - register metadata
 from app.models.detection import Detection  # noqa: F401 - register metadata
 from app.models.frame import Frame  # noqa: F401 - register metadata
 from app.models.inspection import Inspection  # noqa: F401 - register metadata

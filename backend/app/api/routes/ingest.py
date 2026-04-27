@@ -5,12 +5,22 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import aliased
 
 from app.api.deps import DbSession, S3Client, SettingsDep, SQSClient
+from app.models.alignment import Alignment
+from app.models.change_event import ChangeEvent
 from app.models.detection import Detection, DetectionType
 from app.models.frame import Frame
-from app.models.inspection import SourceType
+from app.models.inspection import Inspection, SourceType
+from app.schemas.alignment import (
+    AlignmentCompareResponse,
+    AlignmentPairPublic,
+    ChangeEventPublic,
+    PaginatedAlignmentPairsResponse,
+    PaginatedChangeEventsResponse,
+)
 from app.schemas.detections import DetectionPublic, PaginatedDetectionsResponse
 from app.schemas.frames import FramePublic
 from app.schemas.ingest import CompleteIngestRequest, InspectionPublic, PresignRequest, PresignResponse
@@ -129,7 +139,7 @@ def list_detections(
     frame_id: UUID | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
- ) -> PaginatedDetectionsResponse:
+) -> PaginatedDetectionsResponse:
     """List detections for an inspection with optional type/class/confidence/frame filters."""
     stmt = select(Detection).where(Detection.inspection_id == inspection_id)
     if detection_type is not None:
@@ -180,6 +190,185 @@ def list_frame_detections(
     ).all()
     return PaginatedDetectionsResponse(
         items=[DetectionPublic.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/ingest/{inspection_id}/alignment",
+    response_model=PaginatedAlignmentPairsResponse,
+)
+def list_alignment_pairs(
+    inspection_id: UUID,
+    db: DbSession,
+    asset_zone_id: str | None = None,
+    change_type: str | None = None,
+    detection_type: DetectionType | None = None,
+    class_name: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> PaginatedAlignmentPairsResponse:
+    """List alignment pairs for a target inspection, with asset zone/change filters."""
+    stmt = select(Alignment).where(Alignment.target_inspection_id == inspection_id)
+    if asset_zone_id is not None:
+        stmt = stmt.where(Alignment.asset_zone_id == asset_zone_id)
+    if change_type is not None:
+        stmt = stmt.where(Alignment.change_type == change_type)
+    if class_name is not None:
+        cn = class_name.strip().lower()
+        bd = aliased(Detection)
+        td = aliased(Detection)
+        stmt = stmt.where(
+            or_(
+                select(1)
+                .select_from(bd)
+                .where(bd.id == Alignment.baseline_detection_id, func.lower(bd.class_name) == cn)
+                .exists(),
+                select(1)
+                .select_from(td)
+                .where(td.id == Alignment.target_detection_id, func.lower(td.class_name) == cn)
+                .exists(),
+            )
+        )
+    if detection_type is not None:
+        bd2 = aliased(Detection)
+        td2 = aliased(Detection)
+        stmt = stmt.where(
+            or_(
+                select(1)
+                .select_from(bd2)
+                .where(
+                    bd2.id == Alignment.baseline_detection_id,
+                    bd2.detection_type == detection_type,
+                )
+                .exists(),
+                select(1)
+                .select_from(td2)
+                .where(
+                    td2.id == Alignment.target_detection_id,
+                    td2.detection_type == detection_type,
+                )
+                .exists(),
+            )
+        )
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.scalars(
+        stmt.order_by(Alignment.created_at.asc(), Alignment.id.asc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return PaginatedAlignmentPairsResponse(
+        items=[AlignmentPairPublic.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/ingest/{inspection_id}/changes",
+    response_model=PaginatedChangeEventsResponse,
+)
+def list_change_events(
+    inspection_id: UUID,
+    db: DbSession,
+    event_type: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> PaginatedChangeEventsResponse:
+    """List change events generated for an inspection."""
+    stmt = select(ChangeEvent).where(ChangeEvent.inspection_id == inspection_id)
+    if event_type is not None:
+        stmt = stmt.where(ChangeEvent.event_type == event_type)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.scalars(
+        stmt.order_by(ChangeEvent.created_at.asc(), ChangeEvent.id.asc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return PaginatedChangeEventsResponse(
+        items=[ChangeEventPublic.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/ingest/compare/alignment", response_model=AlignmentCompareResponse)
+def compare_alignment_pairs(
+    baseline_inspection_id: UUID,
+    target_inspection_id: UUID,
+    db: DbSession,
+    asset_zone_id: str | None = None,
+    change_type: str | None = None,
+    detection_type: DetectionType | None = None,
+    class_name: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> AlignmentCompareResponse:
+    """Pairwise alignment rows for a baseline vs target inspection (read-only)."""
+    if (
+        db.get(Inspection, baseline_inspection_id) is None
+        or db.get(Inspection, target_inspection_id) is None
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inspection not found")
+    stmt = select(Alignment).where(
+        Alignment.baseline_inspection_id == baseline_inspection_id,
+        Alignment.target_inspection_id == target_inspection_id,
+    )
+    if asset_zone_id is not None:
+        stmt = stmt.where(Alignment.asset_zone_id == asset_zone_id)
+    if change_type is not None:
+        stmt = stmt.where(Alignment.change_type == change_type)
+    if class_name is not None:
+        cn = class_name.strip().lower()
+        bd = aliased(Detection)
+        td = aliased(Detection)
+        stmt = stmt.where(
+            or_(
+                select(1)
+                .select_from(bd)
+                .where(bd.id == Alignment.baseline_detection_id, func.lower(bd.class_name) == cn)
+                .exists(),
+                select(1)
+                .select_from(td)
+                .where(td.id == Alignment.target_detection_id, func.lower(td.class_name) == cn)
+                .exists(),
+            )
+        )
+    if detection_type is not None:
+        bd2 = aliased(Detection)
+        td2 = aliased(Detection)
+        stmt = stmt.where(
+            or_(
+                select(1)
+                .select_from(bd2)
+                .where(
+                    bd2.id == Alignment.baseline_detection_id,
+                    bd2.detection_type == detection_type,
+                )
+                .exists(),
+                select(1)
+                .select_from(td2)
+                .where(
+                    td2.id == Alignment.target_detection_id,
+                    td2.detection_type == detection_type,
+                )
+                .exists(),
+            )
+        )
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.scalars(
+        stmt.order_by(Alignment.created_at.asc(), Alignment.id.asc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return AlignmentCompareResponse(
+        baseline_inspection_id=baseline_inspection_id,
+        target_inspection_id=target_inspection_id,
+        items=[AlignmentPairPublic.model_validate(r) for r in rows],
         total=total,
         limit=limit,
         offset=offset,
