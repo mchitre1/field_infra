@@ -47,7 +47,7 @@ def _parse_source_type(raw: str) -> SourceType:
         return SourceType(raw)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid source_type: {raw}",
         ) from None
 

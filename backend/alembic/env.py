@@ -14,6 +14,7 @@ from app.models import (  # noqa: F401
     maintenance_recommendation,
     progression_metric,
     risk_rule,
+    issue_state,
 )
 
 config = context.config

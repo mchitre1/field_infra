@@ -1,4 +1,4 @@
-# Ingestion through configurable risk rules API (features 0001-0008)
+# Ingestion through configurable risk rules API (features 0001-0009)
 
 The ingestion layer accepts **images and video** with metadata, writes source objects to **Amazon S3**, records inspections in **PostgreSQL**, and sends a JSON job to **Amazon SQS** when `SQS_QUEUE_URL` is set.
 
@@ -15,6 +15,8 @@ Feature 0006 adds **read-only temporal insights** assembled from existing rows (
 Feature 0007 adds **maintenance recommendations**: after progression, the worker replaces all `maintenance_recommendations` rows for the target inspection with a ranked list per `asset_zone_id` (priority score, label, human-readable `action_summary`, structured `rationale` JSON, and `sla_target_at` from target effective time + configured SLA days). Failures set `metadata.recommendation_error` and `recommendation_count=0` without failing the whole ingest job.
 
 Feature 0008 adds **persisted `risk_rules`** (JSON `match` + `effect` rows) evaluated during that same recommendation pass: base score still comes from feature 0007 settings; matching rules apply **additive** `score_add`, **multiplicative** `score_multiplier`, and **multiplicative** `sla_days_multiplier` on the SLA chosen for the final priority label. Internal ops APIs under `/risk-rules` manage rows (no auth in v1).
+
+Feature 0009 adds **human-curated issue state** per logical issue (`asset_zone_id` + stable `issue_key`): operators set `fixed`, `monitoring`, `deferred`, or `ignored` (optional `notes`, optional `last_target_inspection_id`). Rows are keyed by **`org_scope`**—the string form of `org_id` when set, or the literal **`global`** when `org_id` is omitted—so the same zone key can exist once per org and once globally. Append-only **`issue_state_events`** record transitions (including initial create) for audit. The ingest worker does **not** create or update `issue_states`; only the HTTP API does.
 
 The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped from SQLAlchemy rows.
 
@@ -41,6 +43,10 @@ The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped fro
 | `GET` | `/risk-rules` | List persisted risk rules (`org_id`, `enabled`, pagination) |
 | `POST` | `/risk-rules` | Create a risk rule (`name`, `match`, `effect`, optional `org_id`, `priority`, `enabled`) |
 | `PATCH` | `/risk-rules/{rule_id}` | Partial update of a risk rule |
+| `PUT` | `/issues/state` | Upsert issue state (`issue_key` or `detection_type` + `class_name` + optional `subtype`; body includes `asset_zone_id`, `state`, optional `org_id`, `notes`, `last_target_inspection_id`, `updated_by`) |
+| `GET` | `/issues` | List issue states with filters (`org_id`, `asset_zone_id`, `state`), pagination, optional `include_events=true` |
+
+**`/issues` routes:** No authentication in v1—treat as internal-only (same posture as `/risk-rules`).
 
 Correlation: send `X-Request-ID` or `X-Correlation-ID`; the response echoes `X-Request-ID`. Logs include the correlation id.
 
@@ -341,6 +347,28 @@ curl -sS "http://127.0.0.1:8000/risk-rules?enabled=true&limit=50"
 curl -sS -X POST "http://127.0.0.1:8000/risk-rules" \
   -H "Content-Type: application/json" \
   -d '{"name":"Coastal drone bump","priority":10,"enabled":true,"match":{"match_version":1,"source_types":["drone"],"lat_min":25,"lat_max":50,"lon_min":-130,"lon_max":-60},"effect":{"score_add":5,"sla_days_multiplier":0.75}}'
+```
+
+## Issue state (feature 0009)
+
+**Identity:** Each row is unique on `(org_scope, asset_zone_id, issue_key)`. Supply **`issue_key`** directly in the JSON body, or derive it with **`detection_type`**, **`class_name`**, and optional **`subtype`** (default `"default"`). Server-side derivation uses `build_issue_key`: lowercase trimmed segments joined as **`{detection_type}:{class_name}:{subtype}`** (empty subtype after trim becomes `default`). Typical `detection_type` values match persisted detections (`asset`, `defect`, `environmental_hazard`), but any non-empty strings are accepted after normalization.
+
+**States:** `fixed`, `monitoring`, `deferred`, `ignored` (422 on unknown values, including invalid `state` query filters on **`GET /issues`**).
+
+**`PUT /issues/state`** upserts the current row and appends an **`issue_state_events`** row on create and whenever **`state`** changes (not on note-only updates). On first insert the event has **`from_state`: null** and **`to_state`**: the new state. Optional `last_target_inspection_id` must reference an existing inspection or the request returns **404**. The JSON response always has **`events`: []**; use **`GET /issues?include_events=true`** to load history.
+
+**`GET /issues`** returns `items`, `total`, `limit`, `offset`. Query params: optional `org_id` (UUID; when set, results are limited to that org’s `org_scope`; when omitted, **no** org filter is applied—all `org_scope` buckets may appear, so narrow with `asset_zone_id` / `state` or pass `org_id` for tenant-scoped lists), `asset_zone_id`, `state`, `limit`, `offset`, `include_events` (boolean; when true, each item includes related events ordered by `created_at` ascending).
+
+```bash
+curl -sS -X PUT "http://127.0.0.1:8000/issues/state" \
+  -H "Content-Type: application/json" \
+  -d '{"org_id":"<uuid>","asset_zone_id":"site:defect:crack:1:2","issue_key":"defect:crack:default","state":"monitoring","notes":"watch next flight","updated_by":"ops@example.com"}'
+
+curl -sS -X PUT "http://127.0.0.1:8000/issues/state" \
+  -H "Content-Type: application/json" \
+  -d '{"asset_zone_id":"site:defect:crack:1:2","detection_type":"defect","class_name":"crack","state":"ignored"}'
+
+curl -sS "http://127.0.0.1:8000/issues?org_id=<uuid>&asset_zone_id=site%3Adefect%3Acrack%3A1%3A2&include_events=true"
 ```
 
 ## Configuration
