@@ -1,3 +1,4 @@
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,7 @@ from app.models.frame import Frame
 from app.models.inspection import Inspection, InspectionStatus, SourceType
 from app.models.maintenance_recommendation import MaintenanceRecommendation
 from app.models.progression_metric import ProgressionMetric
+from app.models.risk_rule import RiskRule
 from app.services.recommendation_engine import run_recommendations_for_inspection
 from app.services.recommendation_rules import sla_days_for_label
 
@@ -227,3 +229,83 @@ def test_engine_includes_asset_zone_from_progression_only(sqlite_session: Sessio
     insp = sqlite_session.get(Inspection, tgt_id)
     assert insp is not None
     assert insp.recommendation_count == 1
+
+
+def test_recommendation_engine_persists_sla_days_multiplier(sqlite_session: Session):
+    org = uuid.uuid4()
+    tgt_id = uuid.uuid4()
+    cap = datetime(2025, 8, 15, tzinfo=timezone.utc)
+    sqlite_session.add(
+        Inspection(
+            id=tgt_id,
+            org_id=org,
+            source_type=SourceType.drone,
+            site_hint="s",
+            asset_hint="t",
+            capture_timestamp=cap,
+            s3_bucket="b",
+            s3_key="k1",
+            content_type="image/jpeg",
+            byte_size=10,
+            status=InspectionStatus.alignment_ready,
+        )
+    )
+    sqlite_session.commit()
+    fid = uuid.uuid4()
+    zone_id = "sla-mul-zone"
+    sqlite_session.add(
+        Frame(
+            id=fid,
+            inspection_id=tgt_id,
+            frame_index=0,
+            frame_timestamp_ms=0,
+            s3_bucket="b",
+            s3_key="f.jpg",
+            source_type=SourceType.drone,
+        )
+    )
+    sqlite_session.commit()
+    sqlite_session.add(
+        Detection(
+            id=uuid.uuid4(),
+            inspection_id=tgt_id,
+            frame_id=fid,
+            detection_type=DetectionType.defect,
+            class_name="crack",
+            confidence=0.95,
+            bbox_xmin=0.1,
+            bbox_ymin=0.1,
+            bbox_xmax=0.2,
+            bbox_ymax=0.2,
+            geometry=None,
+            model_name="yolo",
+            model_version="v1",
+            asset_zone_hint=zone_id,
+        )
+    )
+    sqlite_session.add(
+        RiskRule(
+            id=uuid.uuid4(),
+            org_id=None,
+            priority=1,
+            enabled=True,
+            name="halve sla",
+            match={"match_version": 1},
+            effect={"sla_days_multiplier": 0.5, "score_add": 0.0, "score_multiplier": 1.0},
+        )
+    )
+    sqlite_session.commit()
+
+    settings = Settings()
+    n = run_recommendations_for_inspection(
+        settings=settings, db=sqlite_session, inspection_id=tgt_id
+    )
+    assert n == 1
+    row = sqlite_session.scalars(
+        select(MaintenanceRecommendation).where(
+            MaintenanceRecommendation.target_inspection_id == tgt_id
+        )
+    ).first()
+    assert row is not None
+    base_days = sla_days_for_label(settings=settings, label=row.priority_label)
+    assert math.isclose(row.sla_days_suggested, base_days * 0.5, rel_tol=0, abs_tol=1e-6)

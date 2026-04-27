@@ -147,6 +147,22 @@ class Settings(BaseSettings):
         description="Max maintenance recommendation rows persisted per target inspection.",
     )
 
+    risk_rules_default_org_behavior: str = Field(
+        default="merge_global_then_org",
+        description="merge_global_then_org: org-specific rules first, then global; global_only: ignore org rows.",
+    )
+    risk_rules_max_rows_per_eval: int = Field(
+        default=500,
+        ge=1,
+        le=10_000,
+        description="Max risk_rule rows loaded per recommendation run (after merge ordering).",
+    )
+    risk_rules_score_max: float = Field(
+        default=500.0,
+        ge=1.0,
+        description="Clamp final zone score after risk rule multipliers/additions.",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

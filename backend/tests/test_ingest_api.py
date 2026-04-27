@@ -790,3 +790,22 @@ def test_list_recommendations_with_rows(client, sqlite_session):
 
     r2 = client.get(f"/ingest/{insp.id}/recommendations?priority_label=low")
     assert r2.json()["total"] == 0
+
+
+def test_risk_rules_create_and_list(client, sqlite_session):
+    body = {
+        "name": "test-rule",
+        "priority": 5,
+        "enabled": True,
+        "match": {"match_version": 1, "source_types": ["drone"]},
+        "effect": {"score_add": 1.0, "score_multiplier": 1.0},
+    }
+    pr = client.post("/risk-rules", json=body)
+    assert pr.status_code == 201, pr.text
+    rid = pr.json()["id"]
+    lr = client.get("/risk-rules")
+    assert lr.status_code == 200
+    assert any(x["id"] == rid for x in lr.json()["items"])
+    patch = client.patch(f"/risk-rules/{rid}", json={"enabled": False})
+    assert patch.status_code == 200
+    assert patch.json()["enabled"] is False

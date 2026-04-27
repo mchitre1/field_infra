@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.routes import ingest as ingest_routes
+from app.api.routes import risk_rules as risk_rules_routes
 from app.core.config import get_settings
 from app.core.context import correlation_id_var
 from app.core.logging import configure_logging
@@ -57,3 +58,4 @@ def health():
 
 
 app.include_router(ingest_routes.router)
+app.include_router(risk_rules_routes.router)

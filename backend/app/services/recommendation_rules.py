@@ -1,20 +1,28 @@
-"""Rule-based scoring and rationale factors for maintenance recommendations (v1, settings-backed)."""
+"""Rule-based scoring and rationale factors for maintenance recommendations."""
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
+
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.models.change_event import ChangeEvent
 from app.models.detection import Detection, DetectionType
+from app.models.frame import Frame
+from app.models.inspection import Inspection
 from app.models.progression_metric import ProgressionMetric
+from app.models.risk_rule import RiskRule
+from app.services.risk_rule_context import build_risk_rule_context
+from app.services.risk_rule_eval import apply_risk_rule_effects, load_risk_rules
 
 
 def _cap(v: float, cap: float = 50.0) -> float:
     return min(max(v, 0.0), cap)
 
 
-def score_zone(
+def _compute_base_zone_score(
     *,
     settings: Settings,
     zone_id: str,
@@ -22,7 +30,7 @@ def score_zone(
     change_events: list[ChangeEvent],
     progression_metrics: list[ProgressionMetric],
 ) -> tuple[float, list[dict[str, Any]], str]:
-    """Return (priority_score, rationale_factors, suggested_action_summary) for one asset zone."""
+    """Settings-only base score and factors (before persisted ``risk_rules``)."""
     factors: list[dict[str, Any]] = []
     score = 0.0
 
@@ -107,6 +115,50 @@ def score_zone(
         summary = f"Routine monitoring for zone {zone_id}"
 
     return score, factors, summary
+
+
+def score_zone(
+    *,
+    settings: Settings,
+    zone_id: str,
+    detections: list[Detection],
+    change_events: list[ChangeEvent],
+    progression_metrics: list[ProgressionMetric],
+    db: Session | None = None,
+    inspection: Inspection | None = None,
+    frames_by_id: dict[uuid.UUID, Frame] | None = None,
+    preloaded_rules: list[RiskRule] | None = None,
+) -> tuple[float, list[dict[str, Any]], str, float]:
+    """Return ``(priority_score, rationale_factors, action_summary, sla_days_multiplier)``.
+
+    When ``db``, ``inspection``, and ``frames_by_id`` are provided, persisted ``risk_rules``
+    are evaluated after the base score (settings defaults). ``preloaded_rules`` avoids
+    N+1 loads when the caller already fetched rules for the inspection.
+    """
+    base_score, factors, summary = _compute_base_zone_score(
+        settings=settings,
+        zone_id=zone_id,
+        detections=detections,
+        change_events=change_events,
+        progression_metrics=progression_metrics,
+    )
+    sla_mul = 1.0
+    if db is not None and inspection is not None and frames_by_id is not None:
+        rules = preloaded_rules
+        if rules is None:
+            rules = load_risk_rules(db=db, settings=settings, org_id=inspection.org_id)
+        ctx = build_risk_rule_context(
+            inspection=inspection,
+            zone_id=zone_id,
+            zone_detections=detections,
+            frames_by_id=frames_by_id,
+        )
+        final, fired, sla_mul = apply_risk_rule_effects(
+            settings=settings, rules=rules, ctx=ctx, base_score=base_score
+        )
+        factors = factors + fired
+        return final, factors, summary, sla_mul
+    return base_score, factors, summary, sla_mul
 
 
 def priority_label_for_score(*, settings: Settings, score: float) -> str:

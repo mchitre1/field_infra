@@ -1,4 +1,4 @@
-# Ingestion through maintenance recommendations API (features 0001-0007)
+# Ingestion through configurable risk rules API (features 0001-0008)
 
 The ingestion layer accepts **images and video** with metadata, writes source objects to **Amazon S3**, records inspections in **PostgreSQL**, and sends a JSON job to **Amazon SQS** when `SQS_QUEUE_URL` is set.
 
@@ -13,6 +13,8 @@ Feature 0005 adds progression metrics: for each `persisted` alignment pair with 
 Feature 0006 adds **read-only temporal insights** assembled from existing rows (no new pipeline stage): **change maps** (normalized bbox features for overlays), **anomaly timelines** (change events + progression metrics in one time-ordered list), and **trend summaries** (cross-inspection progression aggregates for an `asset_zone_id` + `metric_name`). Limits: `change_map_max_features`, `timeline_max_entries`, `trend_max_points` (see settings).
 
 Feature 0007 adds **maintenance recommendations**: after progression, the worker replaces all `maintenance_recommendations` rows for the target inspection with a ranked list per `asset_zone_id` (priority score, label, human-readable `action_summary`, structured `rationale` JSON, and `sla_target_at` from target effective time + configured SLA days). Failures set `metadata.recommendation_error` and `recommendation_count=0` without failing the whole ingest job.
+
+Feature 0008 adds **persisted `risk_rules`** (JSON `match` + `effect` rows) evaluated during that same recommendation pass: base score still comes from feature 0007 settings; matching rules apply **additive** `score_add`, **multiplicative** `score_multiplier`, and **multiplicative** `sla_days_multiplier` on the SLA chosen for the final priority label. Internal ops APIs under `/risk-rules` manage rows (no auth in v1).
 
 The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped from SQLAlchemy rows.
 
@@ -36,6 +38,9 @@ The HTTP API is **snake_case** in JSON; responses use Pydantic models mapped fro
 | `GET` | `/ingest/timeline` | Unified timeline: `change_event` + `progression_metric` rows for an `asset_zone_id` |
 | `GET` | `/ingest/trends` | Progression series + aggregates for one `asset_zone_id` and `metric_name` across inspections |
 | `GET` | `/ingest/{inspection_id}/recommendations` | Paginated maintenance recommendations (filters: `asset_zone_id`, `priority_label`) |
+| `GET` | `/risk-rules` | List persisted risk rules (`org_id`, `enabled`, pagination) |
+| `POST` | `/risk-rules` | Create a risk rule (`name`, `match`, `effect`, optional `org_id`, `priority`, `enabled`) |
+| `PATCH` | `/risk-rules/{rule_id}` | Partial update of a risk rule |
 
 Correlation: send `X-Request-ID` or `X-Correlation-ID`; the response echoes `X-Request-ID`. Logs include the correlation id.
 
@@ -169,7 +174,7 @@ Current behavior:
     - elapsed time uses each inspection’s `capture_timestamp` when set, otherwise `created_at`
     - crack size proxy is controlled by `progression_crack_metric` (`bbox_width` \| `bbox_area` \| `max_extent`); vegetation v1 uses normalized bbox area only
 12. Set `progression_metric_count` to the number of metric rows written (may be `0` if no eligible pairs).
-13. When status is still `alignment_ready`, run **maintenance recommendations**: delete existing `maintenance_recommendations` for the target inspection, recompute rule-based rows (per `asset_zone_id`), set `recommendation_count`, and clear `metadata.recommendation_error` on success. On recommendation failure, set `metadata.recommendation_error` and `recommendation_count=0` without failing the worker job.
+13. When status is still `alignment_ready`, run **maintenance recommendations**: delete existing `maintenance_recommendations` for the target inspection, recompute rows per `asset_zone_id` using base settings scoring plus persisted **`risk_rules`** (`match` / `effect`), set `recommendation_count`, and clear `metadata.recommendation_error` on success. On recommendation failure, set `metadata.recommendation_error` and `recommendation_count=0` without failing the worker job.
 
 On extraction failure, status is `frames_failed` and error is stored in `inspection.metadata.frame_extraction_error`.
 On detection failure, status is `detections_failed` and error is stored in `inspection.metadata.detection_error`.
@@ -291,7 +296,7 @@ curl -sS "http://127.0.0.1:8000/ingest/trends?asset_zone_id=substation-a%3Acrack
 
 ## Maintenance recommendations (feature 0007)
 
-**Anchor time for SLA:** `sla_target_at` = `coalesce(inspection.capture_timestamp, inspection.created_at)` on the **target** inspection plus `sla_days_suggested` seconds (`sla_days_suggested * 86400`), where `sla_days_suggested` comes from the priority band (`critical` \| `high` \| `medium` \| `low`) via settings (`recommend_sla_days_*`).
+**Anchor time for SLA:** `sla_target_at` = `coalesce(inspection.capture_timestamp, inspection.created_at)` on the **target** inspection plus `sla_days_suggested` seconds (`sla_days_suggested * 86400`), where `sla_days_suggested` is the band’s days from settings (`recommend_sla_days_*`) **times** the product of matching risk rules’ `sla_days_multiplier` (feature 0008; defaults to `1` when no rules match).
 
 **Replace semantics:** Each successful worker run (after progression) **deletes** all prior `maintenance_recommendations` for that `target_inspection_id` and inserts a fresh ranked list (up to `recommend_max_per_inspection`). On generation failure, `metadata.recommendation_error` is set and `recommendation_count` is cleared to `0`.
 
@@ -299,14 +304,43 @@ curl -sS "http://127.0.0.1:8000/ingest/trends?asset_zone_id=substation-a%3Acrack
 
 Returns paginated `items` ordered by `priority_rank`, then `asset_zone_id`. Filters: optional `asset_zone_id` (exact trim), `priority_label` (trimmed, compared to stored lowercase: `critical`, `high`, `medium`, `low`).
 
-Each row includes **`action_summary`** (short line for ops), **`rationale`** (JSON array of factors; each object has `kind`, `message`, and optional `refs` with ids for drill-down to detections, change events, or progression metrics), **`priority_score`** / **`priority_label`** / **`priority_rank`**, and **`sla_target_at`** / **`sla_days_suggested`**.
+Each row includes **`action_summary`** (short line for ops), **`rationale`** (JSON array of factors; each object has `kind`, `message`, and optional `refs`—`kind` may be `detection`, `change_event`, `progression_metric`, `alignment`, `baseline`, or **`risk_rule`** with `refs.risk_rule_id` when feature 0008 rules fire), **`priority_score`** / **`priority_label`** / **`priority_rank`**, and **`sla_target_at`** / **`sla_days_suggested`**.
 
 **Worker gating:** recommendations are generated only when the target inspection **`status` is `alignment_ready`**. If not (e.g. alignment failed earlier), the step is skipped (`recommendation_count` unchanged by that call). The worker wraps recommendation generation in **try/except** so a thrown error does not fail the whole job (logs a warning, returns `0` for that stage).
 
-**Zone keys:** distinct `asset_zone_id` values are the union of zones from target-side **detections** (via `build_asset_zone_id` with the inspection), **change events**, and **alignment pairs**; progression metrics for the target are folded in when scoring.
+**Zone keys:** distinct `asset_zone_id` values are the union of zones from target-side **detections** (via `build_asset_zone_id` with the inspection), **change events**, **alignment pairs**, and **progression metrics** for that target inspection (so progression-only zones still get a recommendation row).
 
 ```bash
 curl -sS "http://127.0.0.1:8000/ingest/<inspection_id>/recommendations?priority_label=critical&limit=20&offset=0"
+```
+
+## Configurable risk rules (feature 0008)
+
+**`match` schema (v1, `match_version: 1`):** Use **`"match_version": 1`** explicitly; any other `match_version` value causes the rule to **never** match (forward compatibility). All other listed keys are optional; omitted keys do not constrain. Predicates are **AND**’d together.
+
+- **`source_types`:** list of strings; target `Inspection.source_type` must be one of them (`drone`, `mobile`, `fixed_camera`).
+- **`asset_classes_any`:** list of lowercased `class_name` values; at least one **asset** detection in the zone must match.
+- **`asset_hint_pattern`:** regex against `Inspection.asset_hint` (case-insensitive).
+- **`min_confidence` / `max_confidence`:** bounds on the zone’s max defect/hazard confidence.
+- **`severity_in`:** list of strings; intersection with severities parsed from `detections.attributes.severity` (case-insensitive) in that zone must be non-empty.
+- **`lat_min`, `lat_max`, `lon_min`, `lon_max`:** all four required if any is set; `Inspection.latitude` / `longitude` must lie inside the box (both must be non-null).
+- **`frame_lat_lon_box`:** object with the same four keys; requires zone-level min/max frame lat/lon from `Frame` rows linked to zone detections; box **interval overlap** in lat and lon must be non-empty.
+- **`inspection_metadata_contains`:** flat object; each key/value must equal `Inspection.metadata` entries.
+
+**`effect` schema (v1):** `score_add` (float, default 0), `score_multiplier` (float, default 1), `sla_days_multiplier` (float, default 1). For each matching rule, adds are **summed**, multipliers **multiplied** across all matches. Final score is clamped to `[0, risk_rules_score_max]`. SLA days for the chosen label are multiplied by the product of all `sla_days_multiplier` values from matching rules.
+
+**Rule load order:** `enabled=true` and (`org_id` is null or equals inspection `org_id`). With `RISK_RULES_DEFAULT_ORG_BEHAVIOR=merge_global_then_org`, **org-specific** rows run first (by `priority`, then `id`), then **global** rows; only the first `risk_rules_max_rows_per_eval` rows after merge are evaluated. With `global_only`, org-specific rows are excluded.
+
+### `/risk-rules` (internal ops, v1)
+
+See the **Endpoints** table above for routes. No authentication in v1—treat as internal-only.
+
+```bash
+curl -sS "http://127.0.0.1:8000/risk-rules?enabled=true&limit=50"
+
+curl -sS -X POST "http://127.0.0.1:8000/risk-rules" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Coastal drone bump","priority":10,"enabled":true,"match":{"match_version":1,"source_types":["drone"],"lat_min":25,"lat_max":50,"lon_min":-130,"lon_max":-60},"effect":{"score_add":5,"sla_days_multiplier":0.75}}'
 ```
 
 ## Configuration
@@ -354,6 +388,9 @@ Environment variables are loaded via `pydantic-settings` (optional `.env` in the
 | `RECOMMEND_BAND_CRITICAL_MIN` / `HIGH` / `MEDIUM` | Score cutoffs for labels (defaults `80` / `45` / `15`) |
 | `RECOMMEND_SLA_DAYS_CRITICAL` … `LOW` | SLA days per label (defaults `7` / `30` / `90` / `180`) |
 | `RECOMMEND_MAX_PER_INSPECTION` | Max recommendation rows per target inspection (default `100`) |
+| `RISK_RULES_DEFAULT_ORG_BEHAVIOR` | `merge_global_then_org` (default) or `global_only` |
+| `RISK_RULES_MAX_ROWS_PER_EVAL` | Max `risk_rules` rows evaluated per recommendation run (default `500`) |
+| `RISK_RULES_SCORE_MAX` | Upper clamp on post-rule zone score (default `500`) |
 
 Allowed MIME types default to `image/jpeg`, `image/png`, `video/mp4`, `video/quicktime`. Override via settings if the project extends the allowlist.
 

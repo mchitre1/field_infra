@@ -5,6 +5,7 @@ from app.models.frame import Frame
 from app.models.inspection import Inspection
 from app.models.maintenance_recommendation import MaintenanceRecommendation
 from app.models.progression_metric import ProgressionMetric
+from app.models.risk_rule import RiskRule
 
 __all__ = [
     "Inspection",
@@ -14,4 +15,5 @@ __all__ = [
     "ChangeEvent",
     "ProgressionMetric",
     "MaintenanceRecommendation",
+    "RiskRule",
 ]

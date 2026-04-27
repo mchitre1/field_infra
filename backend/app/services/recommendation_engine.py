@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -13,6 +14,7 @@ from app.core.config import Settings
 from app.models.alignment import Alignment
 from app.models.change_event import ChangeEvent
 from app.models.detection import Detection
+from app.models.frame import Frame
 from app.models.inspection import Inspection, InspectionStatus
 from app.models.maintenance_recommendation import MaintenanceRecommendation
 from app.models.progression_metric import ProgressionMetric
@@ -22,6 +24,7 @@ from app.services.recommendation_rules import (
     score_zone,
     sla_days_for_label,
 )
+from app.services.risk_rule_eval import load_risk_rules
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +119,14 @@ def run_recommendations_for_inspection(
     for pm in pm_rows:
         pm_by_zone.setdefault(pm.asset_zone_id, []).append(pm)
 
+    all_frame_ids = {d.frame_id for d in detections}
+    frames_by_id: dict[uuid.UUID, Frame] = {}
+    if all_frame_ids:
+        frames = db.scalars(select(Frame).where(Frame.id.in_(all_frame_ids))).all()
+        frames_by_id = {f.id: f for f in frames}
+
+    risk_rules = load_risk_rules(db=db, settings=settings, org_id=inspection.org_id)
+
     zone_keys: set[str] = (
         set(by_zone) | set(ce_by_zone) | set(al_by_zone) | set(pm_by_zone)
     )
@@ -129,17 +140,21 @@ def run_recommendations_for_inspection(
         db.commit()
         return 0
 
-    scored: list[tuple[str, float, list[dict[str, Any]], str]] = []
+    scored: list[tuple[str, float, list[dict[str, Any]], str, float]] = []
     for z in sorted(zone_keys):
         dets = by_zone.get(z, [])
         evs = ce_by_zone.get(z, [])
         pms = pm_by_zone.get(z, [])
-        s, factors, summary = score_zone(
+        s, factors, summary, sla_mul = score_zone(
             settings=settings,
             zone_id=z,
             detections=dets,
             change_events=evs,
             progression_metrics=pms,
+            db=db,
+            inspection=inspection,
+            frames_by_id=frames_by_id,
+            preloaded_rules=risk_rules,
         )
         al_n = len(al_by_zone.get(z, []))
         if not factors and not dets and not evs and not pms and al_n == 0:
@@ -164,9 +179,9 @@ def run_recommendations_for_inspection(
                 }
             ]
             summary = f"Review zone {z}"
-        scored.append((z, s, factors, summary))
+        scored.append((z, s, factors, summary, sla_mul))
 
-    scored.sort(key=lambda row: (-row[1], row[0]))
+    scored.sort(key=lambda row: (-row[1], row[0]))  # score, zone_id
     lim = settings.recommend_max_per_inspection
     truncated = scored[lim:]
     scored = scored[:lim]
@@ -174,9 +189,9 @@ def run_recommendations_for_inspection(
     t_eff = _effective_time(inspection)
     n_written = 0
     try:
-        for rank, (zone_id, pscore, rationale, action_summary) in enumerate(scored, start=1):
+        for rank, (zone_id, pscore, rationale, action_summary, sla_mul) in enumerate(scored, start=1):
             label = priority_label_for_score(settings=settings, score=pscore)
-            days = sla_days_for_label(settings=settings, label=label)
+            days = sla_days_for_label(settings=settings, label=label) * sla_mul
             sla_at = t_eff + timedelta(seconds=days * 86400.0)
             db.add(
                 MaintenanceRecommendation(
