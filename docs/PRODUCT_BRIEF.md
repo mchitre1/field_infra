@@ -52,3 +52,7 @@ IIE is designed as a modular, cloud-native pipeline where each layer can scale i
 - **Compliance:** Auditability and traceability for safety and regulatory workflows
 - **Usability:** Clear, actionable outputs understandable by non-ML operations staff
 - **Extensibility:** Modular model/rule architecture for new asset types and domains
+
+## Repository note
+
+The `backend/` package currently implements the **ingestion** slice: FastAPI upload and presigned-S3 flows, PostgreSQL inspection records, S3 storage, and optional SQS job publish. See [INGEST_API.md](INGEST_API.md) for the live API contract and configuration.
